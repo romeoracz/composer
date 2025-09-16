@@ -24,6 +24,9 @@ model Org {
   metrics      Metric[]
   schedules    Schedule[]
   integrations Integration[]
+  suggestions  Suggestion[]
+  comments     Comment[]
+  activities   Activity[]
   createdAt    DateTime      @default(now())
 }
 
@@ -120,4 +123,39 @@ model Schedule {
   platform String
   postId   String
   runAt    DateTime
+}
+
+model Suggestion {
+  id        String   @id @default(cuid())
+  org       Org      @relation(fields: [orgId], references: [id])
+  orgId     String
+  content   String
+  createdBy String
+  status    String
+  createdAt DateTime @default(now())
+  comments  Comment[]
+  activities Activity[]
+}
+
+model Comment {
+  id           String   @id @default(cuid())
+  org          Org      @relation(fields: [orgId], references: [id])
+  orgId        String
+  suggestion   Suggestion @relation(fields: [suggestionId], references: [id])
+  suggestionId String
+  text         String
+  author       String
+  createdAt    DateTime @default(now())
+}
+
+model Activity {
+  id           String   @id @default(cuid())
+  org          Org      @relation(fields: [orgId], references: [id])
+  orgId        String
+  type         String
+  refId        String?
+  actor        String
+  at           DateTime @default(now())
+  suggestion   Suggestion? @relation(fields: [suggestionId], references: [id])
+  suggestionId String?
 }

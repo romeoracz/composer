@@ -347,14 +347,24 @@ app.get('/history', requireAuth, requireOrg, async (req: any, res) => {
 });
 
 // Analytics ingest
-app.post('/analytics/ingest', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
+app.post('/analytics/ingest', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
   const orgId = req.orgId as string;
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    await prisma.metric.create({ data: { orgId, postId: String(req.body?.postId || ''), platform: String(req.body?.platform || ''), likes: Number(req.body?.likes || 0), comments: Number(req.body?.comments || 0), shares: Number(req.body?.shares || 0), impressions: req.body?.impressions == null ? null : Number(req.body?.impressions), at: new Date(Number(req.body?.at || Date.now())) } });
+    return res.json({ ok: true });
+  }
   addMetric({ ...req.body, orgId });
   res.json({ ok: true });
 });
 
-app.get('/analytics/list', requireAuth, requireOrg, (req: any, res) => {
+app.get('/analytics/list', requireAuth, requireOrg, async (req: any, res) => {
   const { platform, from, to } = req.query as any;
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    const items = await prisma.metric.findMany({ where: { orgId: req.orgId, ...(platform ? { platform: String(platform) } : {}), ...(from ? { at: { gte: new Date(Number(from)) } } : {}), ...(to ? { at: { lte: new Date(Number(to)) } } : {}) }, orderBy: { at: 'asc' } });
+    return res.json({ metrics: items });
+  }
   const parsed = listMetrics({
     orgId: req.orgId,
     platform,
@@ -362,6 +372,60 @@ app.get('/analytics/list', requireAuth, requireOrg, (req: any, res) => {
     to: to ? Number(to) : undefined,
   });
   res.json({ metrics: parsed });
+});
+
+// Scheduling endpoints
+app.get('/schedules', requireAuth, requireOrg, async (req: any, res) => {
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    const items = await prisma.schedule.findMany({ where: { orgId: req.orgId }, orderBy: { runAt: 'asc' } });
+    return res.json({ items });
+  }
+  res.json({ items: listSchedules(req.orgId) });
+});
+
+app.post('/schedules', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
+  const { platform, postId, runAt } = req.body as { platform: string; postId: string; runAt: number };
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    // naive conflict check: same platform within 5m
+    const min = new Date(Number(runAt) - 5 * 60 * 1000);
+    const max = new Date(Number(runAt) + 5 * 60 * 1000);
+    const conflict = await prisma.schedule.findFirst({ where: { orgId: req.orgId, platform, runAt: { gte: min, lte: max } } });
+    if (conflict) return res.status(409).json({ error: 'conflict' });
+    const scheduled = await prisma.schedule.create({ data: { orgId: req.orgId, platform, postId, runAt: new Date(Number(runAt)) } });
+    return res.json({ scheduled });
+  }
+  try {
+    const s = schedulePost(req.orgId, { orgId: req.orgId, platform, postId, runAt });
+    res.json({ scheduled: s });
+  } catch (e: any) {
+    if (e?.message === 'conflict') return res.status(409).json({ error: 'conflict' });
+    return res.status(400).json({ error: 'bad_request' });
+  }
+});
+
+app.post('/schedules/:id/reschedule', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    const existing = await prisma.schedule.findUnique({ where: { id: req.params.id } });
+    if (!existing || existing.orgId !== req.orgId) return res.status(404).json({ error: 'not_found' });
+    const runAt = Number(req.body?.runAt);
+    const min = new Date(runAt - 5 * 60 * 1000);
+    const max = new Date(runAt + 5 * 60 * 1000);
+    const conflict = await prisma.schedule.findFirst({ where: { orgId: req.orgId, platform: existing.platform, NOT: { id: existing.id }, runAt: { gte: min, lte: max } } });
+    if (conflict) return res.status(409).json({ error: 'conflict' });
+    const scheduled = await prisma.schedule.update({ where: { id: existing.id }, data: { runAt: new Date(runAt) } });
+    return res.json({ scheduled });
+  }
+  try {
+    const s = reschedulePost(req.orgId, req.params.id, Number(req.body?.runAt));
+    res.json({ scheduled: s });
+  } catch (e: any) {
+    if (e?.message === 'conflict') return res.status(409).json({ error: 'conflict' });
+    if (e?.message === 'not_found') return res.status(404).json({ error: 'not_found' });
+    return res.status(400).json({ error: 'bad_request' });
+  }
 });
 
 // Exports
@@ -400,6 +464,75 @@ app.get('/inbox/recommendations', requireAuth, requireOrg, (_req, res) => {
     .filter((m) => m.score >= 0.3)
     .sort((a, b) => b.score - a.score);
   res.json({ items: recs });
+});
+
+// Collaboration endpoints
+app.get('/collab/suggestions', requireAuth, requireOrg, async (req: any, res) => {
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    const items = await prisma.suggestion.findMany({ where: { orgId: req.orgId }, orderBy: { createdAt: 'desc' } });
+    return res.json({ items });
+  }
+  res.json({ items: listSuggestions(req.orgId) });
+});
+
+app.post('/collab/suggestions', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
+  const content = String(req.body?.content || '');
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    const suggestion = await prisma.suggestion.create({ data: { orgId: req.orgId, content, createdBy: req.session.user.email, status: 'suggested' } });
+    return res.json({ suggestion });
+  }
+  const role = getRole(req.session.user.email, req.orgId);
+  if (!canSuggest(role)) return res.status(403).json({ error: 'forbidden' });
+  const s = createSuggestion(req.orgId, content, req.session.user.email);
+  res.json({ suggestion: s });
+});
+
+app.post('/collab/suggestions/:id/approve', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    // Only owners can approve: enforce like memory path
+    const role = getRole(req.session.user.email, req.orgId);
+    if (!canApprove(role)) return res.status(403).json({ error: 'forbidden' });
+    const suggestion = await prisma.suggestion.update({ where: { id: req.params.id }, data: { status: 'approved' } });
+    return res.json({ suggestion });
+  }
+  const role = getRole(req.session.user.email, req.orgId);
+  if (!canApprove(role)) return res.status(403).json({ error: 'forbidden' });
+  const s = approveSuggestion(req.orgId, req.params.id, req.session.user.email);
+  res.json({ suggestion: s });
+});
+
+app.get('/collab/suggestions/:id/comments', requireAuth, requireOrg, async (req: any, res) => {
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    const items = await prisma.comment.findMany({ where: { orgId: req.orgId, suggestionId: req.params.id }, orderBy: { createdAt: 'desc' } });
+    return res.json({ items });
+  }
+  res.json({ items: listComments(req.orgId, req.params.id) });
+});
+
+app.post('/collab/suggestions/:id/comments', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
+  const text = String(req.body?.text || '');
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    const comment = await prisma.comment.create({ data: { orgId: req.orgId, suggestionId: req.params.id, text, author: req.session.user.email } });
+    return res.json({ comment });
+  }
+  const role = getRole(req.session.user.email, req.orgId);
+  if (!canComment(role)) return res.status(403).json({ error: 'forbidden' });
+  const c = addComment(req.orgId, req.params.id, text, req.session.user.email);
+  res.json({ comment: c });
+});
+
+app.get('/collab/activity', requireAuth, requireOrg, async (req: any, res) => {
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    const items = await prisma.activity.findMany({ where: { orgId: req.orgId }, orderBy: { at: 'desc' } });
+    return res.json({ items });
+  }
+  res.json({ items: listActivity(req.orgId) });
 });
 
 // CSRF token endpoint
