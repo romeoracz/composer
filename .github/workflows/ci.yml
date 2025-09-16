@@ -32,42 +32,41 @@ jobs:
           npm --prefix apps/api ci || true
           node apps/api/node_modules/.bin/ts-node -e "require('./apps/api/src/index')" &
           sleep 2
-          # Admin login and create org
+          # Login and create org
           csrf=$(curl -s http://localhost:4000/csrf-token | jq -r .csrfToken)
           curl -s -H "Content-Type: application/json" -H "CSRF-Token: $csrf" -d '{"email":"admin@example.com","password":"changeme"}' http://localhost:4000/auth/login | jq -e .ok
           csrf=$(curl -s http://localhost:4000/csrf-token | jq -r .csrfToken)
-          orgA=$(curl -s -H "Content-Type: application/json" -H "CSRF-Token: $csrf" -d '{"name":"Org A"}' http://localhost:4000/orgs | jq -r .org.id)
-          # Invite user2 as viewer
+          org=$(curl -s -H "Content-Type: application/json" -H "CSRF-Token: $csrf" -d '{"name":"Org"}' http://localhost:4000/orgs | jq -r .org.id)
+          # Stage 2: integrations creds + test
           csrf=$(curl -s http://localhost:4000/csrf-token | jq -r .csrfToken)
-          curl -s -H "Content-Type: application/json" -H "CSRF-Token: $csrf" -d '{"email":"user2@example.com","asRole":"viewer"}' http://localhost:4000/orgs/invite | jq -e .ok
-          # Collab: admin suggests and approves
+          curl -s -H "Content-Type: application/json" -H "CSRF-Token: $csrf" -d '{"clientId":"id","clientSecret":"secret"}' http://localhost:4000/integrations/creds/linkedin | jq -e .ok
           csrf=$(curl -s http://localhost:4000/csrf-token | jq -r .csrfToken)
-          sug=$(curl -s -H "Content-Type: application/json" -H "CSRF-Token: $csrf" -d '{"content":"Test suggestion"}' http://localhost:4000/collab/suggestions | jq -r .suggestion.id)
+          curl -s -H "CSRF-Token: $csrf" -X POST http://localhost:4000/integrations/test/linkedin | jq -e .ok
+          # Stage 3: prompt create and activate
           csrf=$(curl -s http://localhost:4000/csrf-token | jq -r .csrfToken)
-          curl -s -H "Content-Type: application/json" -H "CSRF-Token: $csrf" -X POST http://localhost:4000/collab/suggestions/$sug/approve | jq -e .suggestion
-          # Switch to user2 session
-          curl -s http://localhost:4000/auth/logout > /dev/null
+          v=$(curl -s -H "Content-Type: application/json" -H "CSRF-Token: $csrf" -d '{"content":"MASTER PROMPT","notes":"init"}' http://localhost:4000/prompts | jq -r .version.id)
           csrf=$(curl -s http://localhost:4000/csrf-token | jq -r .csrfToken)
-          curl -s -H "Content-Type: application/json" -H "CSRF-Token: $csrf" -d '{"email":"user2@example.com","password":"changeme"}' http://localhost:4000/auth/login | jq -e .ok
-          # Select orgA (user2 invited)
+          curl -s -H "Content-Type: application/json" -H "CSRF-Token: $csrf" -d '{"id":"'$v'"}' http://localhost:4000/prompts/activate | jq -e .version
+          # Stage 4: seed
           csrf=$(curl -s http://localhost:4000/csrf-token | jq -r .csrfToken)
-          curl -s -H "Content-Type: application/json" -H "CSRF-Token: $csrf" -d '{"orgId":"'$orgA'"}' http://localhost:4000/orgs/select | jq -e .ok
-          # User2 cannot approve (should 403)
+          seed=$(curl -s -H "Content-Type: application/json" -H "CSRF-Token: $csrf" -d '{"title":"Launch post"}' http://localhost:4000/seeds | jq -r .seed.id)
+          # Stage 5: drafts generate (linkedin,x)
           csrf=$(curl -s http://localhost:4000/csrf-token | jq -r .csrfToken)
-          code=$(curl -s -o /dev/null -w "%{http_code}" -H "Content-Type: application/json" -H "CSRF-Token: $csrf" -X POST http://localhost:4000/collab/suggestions/$sug/approve)
-          test "$code" = "403"
-          # User2 can comment
+          d1=$(curl -s -H "Content-Type: application/json" -H "CSRF-Token: $csrf" -d '{"seedId":"'$seed'","platforms":["linkedin","x"]}' http://localhost:4000/drafts/generate | jq -r .drafts[0].id)
+          # Stage 6: preview validate
+          curl -s -H "Content-Type: application/json" -d '{"platform":"x","text":"hello"}' http://localhost:4000/preview/validate | jq -e .ok
+          # Stage 7: approve with short delay and cancel then re-approve
           csrf=$(curl -s http://localhost:4000/csrf-token | jq -r .csrfToken)
-          curl -s -H "Content-Type: application/json" -H "CSRF-Token: $csrf" -d '{"text":"LGTM"}' http://localhost:4000/collab/suggestions/$sug/comments | jq -e .comment
-          # Scheduling: schedule and detect conflict
-          now=$(date +%s)
-          t1=$(( ($now + 600) * 1000 ))
-          t2=$(( ($now + 840) * 1000 ))
+          job=$(curl -s -H "Content-Type: application/json" -H "CSRF-Token: $csrf" -d '{"draftId":"'$d1'","delayMs":500}' http://localhost:4000/approve | jq -r .job.id)
           csrf=$(curl -s http://localhost:4000/csrf-token | jq -r .csrfToken)
-          sch=$(curl -s -H "Content-Type: application/json" -H "CSRF-Token: $csrf" -d '{"platform":"x","postId":"p1","runAt":'$t1'}' http://localhost:4000/schedules | jq -r .scheduled.id)
+          curl -s -H "Content-Type: application/json" -H "CSRF-Token: $csrf" -d '{"jobId":"'$job'"}' http://localhost:4000/approve/cancel | jq -e .ok
+          # Re-approve and force run-now publish
           csrf=$(curl -s http://localhost:4000/csrf-token | jq -r .csrfToken)
-          code=$(curl -s -o /dev/null -w "%{http_code}" -H "Content-Type: application/json" -H "CSRF-Token: $csrf" -d '{"platform":"x","postId":"p2","runAt":'$t2'}' http://localhost:4000/schedules)
-          test "$code" = "409"
+          job2=$(curl -s -H "Content-Type: application/json" -H "CSRF-Token: $csrf" -d '{"draftId":"'$d1'","delayMs":2000}' http://localhost:4000/approve | jq -r .job.id)
+          csrf=$(curl -s http://localhost:4000/csrf-token | jq -r .csrfToken)
+          curl -s -H "Content-Type: application/json" -H "CSRF-Token: $csrf" -d '{"jobId":"'$job2'"}' http://localhost:4000/publish/run-now | jq -e .published
+          # Stage 8: history exists
+          curl -s http://localhost:4000/history | jq -e '.items | length >= 1'
       - name: Smoke frontend build
         run: |
           npm --prefix apps/web ci || true

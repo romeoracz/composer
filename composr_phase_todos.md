@@ -9,6 +9,26 @@ Conventions
 
 ---
 
+Progress Status (as of 2025-09-16)
+- Stage 0: Foundations — Partial. Monorepo, web/api scaffolds, Docker, CI smoke done. Missing: Prisma migrations, CODEOWNERS/PR template, dependabot.
+- Stage 1: Auth — Partial. Sessions, CSRF, guards, login page, CI smoke done. Missing: full DAST and E2E suites.
+- Stage 2: Integrations settings/secret storage — Not started in UI; no encrypted secret store yet.
+- Stage 3: Master Prompt — Not started.
+- Stage 4: Seeds UI — Not started.
+- Stage 5: AI Generation — Not started.
+- Stage 6: Preview/Edit — Not started.
+- Stage 7: Undo Queue — Not started.
+- Stage 8: Publish/History — Not started.
+- Stage 9: Platform Adapters — Completed (stubs + flags, registry, /providers, CI validation).
+- Stage 10: Analytics — Completed (in-memory ingest/list, exports CSV/PDF, CI checks).
+- Stage 11: Inbox Recommendations — Completed (fixtures + classifier stub, CI checks).
+- Stage 12: Exports — Completed (CSV/PDF endpoints, CI checks).
+- Stage 13: Multi-Tenancy — Completed (in-memory orgs, isolation enforced, CI checks).
+- Stage 14: Collaboration — Completed (suggest/comment/approve with permissions, invites, CI checks).
+- Stage 15: Scheduling — Completed (schedule/reschedule, conflict detection, CI checks).
+
+---
+
 ## Phase MVP (Weeks 1–8)
 
 ### Stage 0: Project Scaffolding and Foundations

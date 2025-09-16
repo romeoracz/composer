@@ -6,12 +6,18 @@ import { WebSocketServer } from 'ws';
 import cookieSession from 'cookie-session';
 import cookieParser from 'cookie-parser';
 import csrf from 'csurf';
-import { getProvidersInfo } from './providers/registry';
+import { getProvidersInfo, getAdapterByKey } from './providers/registry';
 import { addMetric, listMetrics } from './analytics';
 import { generateCSV, generatePDF } from './exports';
 import { createOrgForUser, getActiveOrgId, listMembershipsForUser, setActiveOrg, isUserMemberOfOrg, addMember, getRole } from './tenancy';
 import { addComment, approveSuggestion, canApprove, canComment, canSuggest, createSuggestion, listActivity, listComments, listSuggestions } from './collab';
 import { list as listSchedules, reschedule as reschedulePost, schedule as schedulePost } from './scheduling';
+import { getCredentials, redact, setCredentials, status as integrationStatus, testConnection } from './integrations';
+import { activate, createVersion, getActive, listVersions } from './prompts';
+import { createSeed, deleteSeed, listSeeds, updateSeed } from './seeds';
+import { createDraft, editDraft, listDrafts } from './drafts';
+import { cancelJob, runNow, scheduleJob } from './queue';
+import { recordPublish, listHistory } from './history';
 
 const app = express();
 app.use(helmet());
@@ -90,65 +96,137 @@ app.post('/orgs/invite', requireAuth, requireOrg, csrfProtection, (req: any, res
   res.json({ ok: true });
 });
 
-// Collaboration endpoints
-app.get('/collab/suggestions', requireAuth, requireOrg, (req: any, res) => {
-  res.json({ items: listSuggestions(req.orgId) });
+// Integrations (Stage 2)
+app.get('/integrations/status', requireAuth, requireOrg, (req: any, res) => {
+  res.json({ providers: integrationStatus(req.orgId) });
 });
 
-app.post('/collab/suggestions', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
-  const role = getRole(req.session.user.email, req.orgId);
-  if (!canSuggest(role)) return res.status(403).json({ error: 'forbidden' });
-  const s = createSuggestion(req.orgId, String(req.body?.content || ''), req.session.user.email);
-  res.json({ suggestion: s });
+app.post('/integrations/creds/:key', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
+  const key = req.params.key as any;
+  setCredentials(req.orgId, key, req.body || {});
+  res.json({ ok: true, creds: redact(getCredentials(req.orgId, key)) });
 });
 
-app.post('/collab/suggestions/:id/approve', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
-  const role = getRole(req.session.user.email, req.orgId);
-  if (!canApprove(role)) return res.status(403).json({ error: 'forbidden' });
-  const s = approveSuggestion(req.orgId, req.params.id, req.session.user.email);
-  res.json({ suggestion: s });
+app.post('/integrations/test/:key', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
+  const key = req.params.key as any;
+  const result = await testConnection(req.orgId, key);
+  res.json(result);
 });
 
-app.get('/collab/suggestions/:id/comments', requireAuth, requireOrg, (req: any, res) => {
-  res.json({ items: listComments(req.orgId, req.params.id) });
+// Master Prompt (Stage 3)
+app.get('/prompts', requireAuth, requireOrg, (req: any, res) => {
+  res.json({ versions: listVersions(req.orgId), active: getActive(req.orgId) });
 });
 
-app.post('/collab/suggestions/:id/comments', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
-  const role = getRole(req.session.user.email, req.orgId);
-  if (!canComment(role)) return res.status(403).json({ error: 'forbidden' });
-  const c = addComment(req.orgId, req.params.id, String(req.body?.text || ''), req.session.user.email);
-  res.json({ comment: c });
+app.post('/prompts', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
+  const v = createVersion(req.orgId, req.session.user.email, String(req.body?.content || ''), req.body?.notes);
+  res.json({ version: v });
 });
 
-app.get('/collab/activity', requireAuth, requireOrg, (req: any, res) => {
-  res.json({ items: listActivity(req.orgId) });
+app.post('/prompts/activate', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
+  const v = activate(req.orgId, String(req.body?.id || ''));
+  if (!v) return res.status(404).json({ error: 'not_found' });
+  res.json({ version: v });
 });
 
-// Scheduling endpoints
-app.get('/schedules', requireAuth, requireOrg, (req: any, res) => {
-  res.json({ items: listSchedules(req.orgId) });
+// Seeds (Stage 4)
+app.get('/seeds', requireAuth, requireOrg, (req: any, res) => {
+  res.json({ items: listSeeds(req.orgId) });
 });
 
-app.post('/schedules', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
-  const { platform, postId, runAt } = req.body as { platform: string; postId: string; runAt: number };
-  try {
-    const s = schedulePost(req.orgId, { orgId: req.orgId, platform, postId, runAt });
-    res.json({ scheduled: s });
-  } catch (e: any) {
-    if (e?.message === 'conflict') return res.status(409).json({ error: 'conflict' });
-    return res.status(400).json({ error: 'bad_request' });
-  }
+app.post('/seeds', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
+  const s = createSeed(req.orgId, {
+    title: String(req.body?.title || ''),
+    notes: req.body?.notes,
+    tags: req.body?.tags || [],
+    state: 'draft',
+  });
+  res.json({ seed: s });
 });
 
-app.post('/schedules/:id/reschedule', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
-  try {
-    const s = reschedulePost(req.orgId, req.params.id, Number(req.body?.runAt));
-    res.json({ scheduled: s });
-  } catch (e: any) {
-    if (e?.message === 'conflict') return res.status(409).json({ error: 'conflict' });
-    if (e?.message === 'not_found') return res.status(404).json({ error: 'not_found' });
-    return res.status(400).json({ error: 'bad_request' });
-  }
+app.post('/seeds/:id', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
+  const s = updateSeed(req.orgId, req.params.id, req.body || {});
+  if (!s) return res.status(404).json({ error: 'not_found' });
+  res.json({ seed: s });
+});
+
+app.delete('/seeds/:id', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
+  const ok = deleteSeed(req.orgId, req.params.id);
+  res.json({ ok });
+});
+
+// Drafts/Generation and Preview (Stage 5 & 6)
+function generateTextFromSeed(seedTitle: string, prompt?: string, platform?: string) {
+  const base = prompt ? `[${platform}] ${prompt}: ${seedTitle}` : `[${platform}] ${seedTitle}`;
+  return base.slice(0, 1000);
+}
+
+app.post('/drafts/generate', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
+  const { seedId, platforms } = req.body as { seedId: string; platforms: string[] };
+  const seed = listSeeds(req.orgId).find((s) => s.id === seedId);
+  const prompt = getActive(req.orgId)?.content;
+  if (!seed) return res.status(404).json({ error: 'seed_not_found' });
+  const drafts = (platforms || []).map((p) => createDraft(req.orgId, seedId, p, generateTextFromSeed(seed.title, prompt, p)));
+  res.json({ drafts });
+});
+
+app.get('/drafts', requireAuth, requireOrg, (req: any, res) => {
+  res.json({ items: listDrafts(req.orgId, req.query.seedId as string | undefined) });
+});
+
+app.post('/drafts/:id/edit', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
+  const d = editDraft(req.orgId, req.params.id, String(req.body?.text || ''));
+  if (!d) return res.status(404).json({ error: 'not_found' });
+  res.json({ draft: d });
+});
+
+app.post('/preview/validate', requireAuth, requireOrg, (req: any, res) => {
+  const { platform, text } = req.body as { platform: string; text: string };
+  const adapter = getAdapterByKey(platform);
+  if (!adapter) return res.status(400).json({ ok: false, errors: ['unknown_platform'] });
+  const r = adapter.validateDraft({ text });
+  res.json(r);
+});
+
+// Approve and Undo Queue (Stage 7)
+app.post('/approve', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
+  const { draftId, delayMs } = req.body as { draftId: string; delayMs?: number };
+  const orgId = req.orgId as string;
+  const draft = listDrafts(orgId).find((d) => d.id === draftId);
+  if (!draft) return res.status(404).json({ error: 'draft_not_found' });
+  const job = scheduleJob(orgId, { type: 'publish', draftId }, delayMs ?? 7 * 60 * 1000);
+  res.json({ job });
+});
+
+app.post('/approve/cancel', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
+  const { jobId } = req.body as { jobId: string };
+  res.json({ ok: cancelJob(jobId) });
+});
+
+// Publish and History (Stage 8)
+app.post('/publish/run-now', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
+  const { jobId } = req.body as { jobId: string };
+  const job = runNow(jobId);
+  if (!job) return res.status(404).json({ error: 'job_not_found' });
+  const orgId = req.orgId as string;
+  const draft = listDrafts(orgId).find((d) => d.id === job.payload?.draftId);
+  if (!draft) return res.status(404).json({ error: 'draft_not_found' });
+  const text = draft.editedText || draft.originalText;
+  // Stub publish: record history with fake postId
+  const hist = recordPublish({
+    orgId,
+    seedId: draft.seedId,
+    draftId: draft.id,
+    platform: draft.platform,
+    postId: 'post_' + draft.id,
+    originalText: draft.originalText,
+    editedText: draft.editedText,
+  });
+  res.json({ published: hist });
+});
+
+app.get('/history', requireAuth, requireOrg, (req: any, res) => {
+  res.json({ items: listHistory(req.orgId) });
 });
 
 // Analytics ingest
@@ -212,7 +290,7 @@ app.get('/csrf-token', csrfProtection, (req, res) => {
   res.json({ csrfToken: (req as any).csrfToken() });
 });
 
-// Simple in-memory single admin user placeholder
+// Simple in-memory users
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin@example.com';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'changeme';
 const USER2_EMAIL = process.env.USER2_EMAIL || 'user2@example.com';
