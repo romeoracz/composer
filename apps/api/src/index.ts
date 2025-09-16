@@ -21,8 +21,11 @@ import { recordPublish, listHistory } from './history';
 import { getQueueDriver, initBull, addBullJob, startBullWorker } from './queueDriver';
 import { getDriver } from './repo';
 import { getPrisma } from './prismaClient';
+import { encryptJson } from './crypto';
+import { withRequestId } from './logging';
 
 const app = express();
+app.use(withRequestId);
 app.use(helmet());
 
 const WEB_ORIGIN = process.env.WEB_ORIGIN || 'http://localhost:3000';
@@ -100,12 +103,27 @@ app.post('/orgs/invite', requireAuth, requireOrg, csrfProtection, (req: any, res
 });
 
 // Integrations (Stage 2)
-app.get('/integrations/status', requireAuth, requireOrg, (req: any, res) => {
+app.get('/integrations/status', requireAuth, requireOrg, async (req: any, res) => {
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    const rows = await prisma.integration.findMany({ where: { orgId: req.orgId } });
+    const providers = ['linkedin', 'x', 'instagram', 'facebook', 'tiktok'].map((k) => {
+      const row = rows.find((r) => r.provider === k);
+      return { key: k, hasCreds: !!row, creds: row ? { clientId: '***', clientSecret: '***' } : undefined };
+    });
+    return res.json({ providers });
+  }
   res.json({ providers: integrationStatus(req.orgId) });
 });
 
-app.post('/integrations/creds/:key', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
+app.post('/integrations/creds/:key', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
   const key = req.params.key as any;
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    const data = encryptJson(req.body || {});
+    await prisma.integration.upsert({ where: { orgId_provider: { orgId: req.orgId, provider: key } }, update: { data }, create: { orgId: req.orgId, provider: key, data } });
+    return res.json({ ok: true, creds: { clientId: '***', clientSecret: '***' } });
+  }
   setCredentials(req.orgId, key, req.body || {});
   res.json({ ok: true, creds: redact(getCredentials(req.orgId, key)) });
 });
