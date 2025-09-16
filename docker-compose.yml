@@ -24,6 +24,14 @@ services:
     command: npm run dev
     environment:
       PORT: 4000
+      WEB_ORIGIN: http://localhost:3000
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/composr
+      REDIS_URL: redis://redis:6379
+      DB_DRIVER: prisma
+      QUEUE_DRIVER: bullmq
+      SESSION_SECRET: devsecret
+      ADMIN_EMAIL: admin@example.com
+      ADMIN_PASSWORD: changeme
     ports:
       - "4000:4000"
     volumes:
@@ -39,6 +47,7 @@ services:
     command: npm run dev
     environment:
       PORT: 3000
+      NEXT_PUBLIC_API_ORIGIN: http://localhost:4000
     ports:
       - "3000:3000"
     volumes:

@@ -19,6 +19,8 @@ import { createDraft, editDraft, listDrafts } from './drafts';
 import { cancelJob, runNow, scheduleJob } from './queue';
 import { recordPublish, listHistory } from './history';
 import { getQueueDriver, initBull, addBullJob, startBullWorker } from './queueDriver';
+import { getDriver } from './repo';
+import { getPrisma } from './prismaClient';
 
 const app = express();
 app.use(helmet());
@@ -131,27 +133,48 @@ app.post('/prompts/activate', requireAuth, requireOrg, csrfProtection, (req: any
 });
 
 // Seeds (Stage 4)
-app.get('/seeds', requireAuth, requireOrg, (req: any, res) => {
+app.get('/seeds', requireAuth, requireOrg, async (req: any, res) => {
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    const items = await prisma.seed.findMany({ where: { orgId: req.orgId }, orderBy: { createdAt: 'desc' } });
+    return res.json({ items });
+  }
   res.json({ items: listSeeds(req.orgId) });
 });
 
-app.post('/seeds', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
-  const s = createSeed(req.orgId, {
+app.post('/seeds', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
+  const payload = {
     title: String(req.body?.title || ''),
     notes: req.body?.notes,
-    tags: req.body?.tags || [],
-    state: 'draft',
-  });
+    tags: (req.body?.tags || []) as string[],
+    state: 'draft' as const,
+  };
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    const seed = await prisma.seed.create({ data: { orgId: req.orgId, ...payload } });
+    return res.json({ seed });
+  }
+  const s = createSeed(req.orgId, payload);
   res.json({ seed: s });
 });
 
-app.post('/seeds/:id', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
+app.post('/seeds/:id', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    const seed = await prisma.seed.update({ where: { id: req.params.id }, data: req.body || {} });
+    return res.json({ seed });
+  }
   const s = updateSeed(req.orgId, req.params.id, req.body || {});
   if (!s) return res.status(404).json({ error: 'not_found' });
   res.json({ seed: s });
 });
 
-app.delete('/seeds/:id', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
+app.delete('/seeds/:id', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    await prisma.seed.delete({ where: { id: req.params.id } });
+    return res.json({ ok: true });
+  }
   const ok = deleteSeed(req.orgId, req.params.id);
   res.json({ ok });
 });
