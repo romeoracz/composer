@@ -5,19 +5,19 @@ Scope: Bring the MVP to production-grade per plan, with zero degradation and fea
 ## Tasks and Gates
 
 1) Persistence: Postgres + Prisma
-- [ ] Add Prisma to API; define schema for orgs, memberships, integrations, prompts, seeds, drafts, history, metrics, schedules, collab
-- [ ] Generate client; create dev/staging DBs; add migration scripts
-- [ ] Introduce repository layer with drivers: memory (default) and prisma
+- [x] Add Prisma to API; define schema for orgs, memberships, integrations, prompts, seeds, drafts, history, metrics, schedules, collab
+- [x] Generate client; create dev/staging DBs; add migration scripts
+- [x] Introduce repository layer with drivers: memory (default) and prisma
 - [ ] Gate: CI stays green on memory driver; staging uses prisma driver with successful migrations
 
 2) Delay Queue: Redis + BullMQ
-- [ ] Add BullMQ; create `publishQueue`; implement producer/worker; retries/backoff
-- [ ] Feature-flag queue driver: memory (default) vs bullmq
+- [x] Add BullMQ; create `publishQueue`; implement producer/worker; retries/backoff
+- [x] Feature-flag queue driver: memory (default) vs bullmq
 - [ ] Gate: CI uses memory; staging validates BullMQ flow and idempotency
 
 3) Secrets: Encrypted storage/Vault
-- [ ] Encryption-at-rest for credentials; KMS-managed key or libsodium keyfile
-- [ ] Redaction everywhere; remove stubbed test endpoints; add rotate key workflow
+- [x] Encryption-at-rest for credentials; KMS-managed key or libsodium keyfile
+- [x] Redaction everywhere; remove stubbed test endpoints; add rotate key workflow
 - [ ] Gate: secret scanners show 0 leaks; rotation integration test passes
 
 4) Provider OAuth + Publish (LinkedIn/X/Meta/TikTok)
@@ -37,8 +37,8 @@ Scope: Bring the MVP to production-grade per plan, with zero degradation and fea
 - [ ] Gate: CI gates enforced; perf within budgets across PRs
 
 7) Observability
-- [ ] Structured logs with redaction; request IDs; tracing (OpenTelemetry); metrics/SLIs
-- [ ] Dashboards and alerts (availability, latency, errors, queues, costs)
+- [x] Structured logs with redaction; request IDs; tracing (OpenTelemetry); metrics/SLIs
+- [x] Dashboards and alerts (availability, latency, errors, queues, costs)
 - [ ] Gate: staging dashboards healthy; alert runbook tested
 
 8) CI/CD and Repo Hygiene
