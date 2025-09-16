@@ -6,19 +6,22 @@ export type Metric = {
   shares: number;
   impressions?: number;
   at: number; // epoch ms
+  orgId: string; // tenant scope
 };
 
-const metrics: Metric[] = [];
+const metricsByOrg: Record<string, Metric[]> = {};
 
 export function addMetric(m: Metric) {
-  metrics.push(m);
+  if (!metricsByOrg[m.orgId]) metricsByOrg[m.orgId] = [];
+  metricsByOrg[m.orgId].push(m);
 }
 
-export function listMetrics(filter?: { platform?: string; from?: number; to?: number }) {
-  return metrics.filter((m) => {
-    if (filter?.platform && m.platform !== filter.platform) return false;
-    if (typeof filter?.from === 'number' && m.at < filter.from) return false;
-    if (typeof filter?.to === 'number' && m.at > filter.to) return false;
+export function listMetrics(filter: { orgId: string; platform?: string; from?: number; to?: number }) {
+  const collection = metricsByOrg[filter.orgId] || [];
+  return collection.filter((m) => {
+    if (filter.platform && m.platform !== filter.platform) return false;
+    if (typeof filter.from === 'number' && m.at < filter.from) return false;
+    if (typeof filter.to === 'number' && m.at > filter.to) return false;
     return true;
   });
 }

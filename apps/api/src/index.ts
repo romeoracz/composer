@@ -9,6 +9,7 @@ import csrf from 'csurf';
 import { getProvidersInfo } from './providers/registry';
 import { addMetric, listMetrics } from './analytics';
 import { generateCSV, generatePDF } from './exports';
+import { createOrgForUser, getActiveOrgId, listMembershipsForUser, setActiveOrg, isUserMemberOfOrg } from './tenancy';
 
 const app = express();
 app.use(helmet());
@@ -33,6 +34,20 @@ app.use(
 
 const csrfProtection = csrf({ cookie: { httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production' } });
 
+function requireAuth(req: any, res: any, next: any) {
+  if (!req.session?.user) return res.status(401).json({ error: 'unauthorized' });
+  next();
+}
+
+function requireOrg(req: any, res: any, next: any) {
+  const orgId = getActiveOrgId(req.session);
+  if (!orgId) return res.status(400).json({ error: 'no_active_org' });
+  const email = req.session.user?.email;
+  if (!email || !isUserMemberOfOrg(email, orgId)) return res.status(403).json({ error: 'forbidden' });
+  (req as any).orgId = orgId;
+  next();
+}
+
 app.get('/health', (_req, res) => {
   res.status(200).json({ status: 'ok' });
 });
@@ -41,15 +56,40 @@ app.get('/providers', (_req, res) => {
   res.json({ providers: getProvidersInfo() });
 });
 
-// Analytics ingest
-app.post('/analytics/ingest', csrfProtection, (req, res) => {
-  addMetric(req.body);
+// Tenancy endpoints
+app.post('/orgs', requireAuth, csrfProtection, (req, res) => {
+  const email = (req.session as any).user.email;
+  const name = (req.body?.name as string) || 'My Org';
+  const org = createOrgForUser(email, name);
+  setActiveOrg(req.session, org.id);
+  res.json({ org });
+});
+
+app.get('/orgs/memberships', requireAuth, (req, res) => {
+  const email = (req.session as any).user.email;
+  const list = listMembershipsForUser(email);
+  res.json({ memberships: list });
+});
+
+app.post('/orgs/select', requireAuth, csrfProtection, (req, res) => {
+  const email = (req.session as any).user.email;
+  const orgId = req.body?.orgId as string;
+  if (!orgId || !isUserMemberOfOrg(email, orgId)) return res.status(400).json({ error: 'invalid_org' });
+  setActiveOrg(req.session, orgId);
   res.json({ ok: true });
 });
 
-app.get('/analytics/list', (req, res) => {
+// Analytics ingest
+app.post('/analytics/ingest', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
+  const orgId = req.orgId as string;
+  addMetric({ ...req.body, orgId });
+  res.json({ ok: true });
+});
+
+app.get('/analytics/list', requireAuth, requireOrg, (req: any, res) => {
   const { platform, from, to } = req.query as any;
   const parsed = listMetrics({
+    orgId: req.orgId,
     platform,
     from: from ? Number(from) : undefined,
     to: to ? Number(to) : undefined,
@@ -58,7 +98,7 @@ app.get('/analytics/list', (req, res) => {
 });
 
 // Exports
-app.get('/exports/csv', (req, res) => {
+app.get('/exports/csv', requireAuth, requireOrg, (req: any, res) => {
   const { platform, from, to } = req.query as any;
   const csv = generateCSV({ platform, from: from ? Number(from) : undefined, to: to ? Number(to) : undefined });
   res.setHeader('Content-Type', 'text/csv');
@@ -66,7 +106,7 @@ app.get('/exports/csv', (req, res) => {
   res.send(csv);
 });
 
-app.get('/exports/pdf', async (req, res) => {
+app.get('/exports/pdf', requireAuth, requireOrg, async (req: any, res) => {
   const { platform, from, to } = req.query as any;
   const pdf = await generatePDF({ platform, from: from ? Number(from) : undefined, to: to ? Number(to) : undefined });
   res.setHeader('Content-Type', 'application/pdf');
@@ -87,7 +127,7 @@ function classifyRelevant(message: { subject: string; body: string }) {
   return score; // 0..1
 }
 
-app.get('/inbox/recommendations', (_req, res) => {
+app.get('/inbox/recommendations', requireAuth, requireOrg, (_req, res) => {
   const recs = inboxFixtures
     .map((m) => ({ ...m, score: classifyRelevant(m) }))
     .filter((m) => m.score >= 0.3)

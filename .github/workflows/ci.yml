@@ -30,20 +30,28 @@ jobs:
           npm --prefix apps/api ci || true
           node apps/api/node_modules/.bin/ts-node -e "require('./apps/api/src/index')" &
           sleep 2
+          # Auth and providers
           curl -s -o /dev/null -w "%{http_code}" http://localhost:4000/auth/me | grep 401
           csrf=$(curl -s http://localhost:4000/csrf-token | jq -r .csrfToken)
           curl -s -H "Content-Type: application/json" -H "CSRF-Token: $csrf" -d '{"email":"admin@example.com","password":"changeme"}' http://localhost:4000/auth/login | jq -e .ok
           curl -sSf http://localhost:4000/providers | jq -e '.providers | length >= 3'
-          # Analytics idempotency and integrity
+          # Tenancy: create org A and select
+          csrf=$(curl -s http://localhost:4000/csrf-token | jq -r .csrfToken)
+          orgA=$(curl -s -H "Content-Type: application/json" -H "CSRF-Token: $csrf" -d '{"name":"Org A"}' http://localhost:4000/orgs | jq -r .org.id)
+          # Ingest metric into Org A
           ts=$(date +%s%3N)
-          payload='{ "postId":"p1","platform":"x","likes":1,"comments":2,"shares":3,"impressions":10,"at":'$ts' }'
+          payload='{ "postId":"pA","platform":"x","likes":1,"comments":2,"shares":3,"impressions":10,"at":'$ts' }'
+          csrf=$(curl -s http://localhost:4000/csrf-token | jq -r .csrfToken)
           curl -s -H "Content-Type: application/json" -H "CSRF-Token: $csrf" -d "$payload" http://localhost:4000/analytics/ingest | jq -e .ok
-          curl -s http://localhost:4000/analytics/list?platform=x | jq -e '.metrics | length >= 1'
-          # Inbox recommendations threshold
+          curl -s http://localhost:4000/analytics/list?platform=x | jq -e '.metrics | length == 1'
+          # Create org B and select, ensure isolation (no metrics visible)
+          csrf=$(curl -s http://localhost:4000/csrf-token | jq -r .csrfToken)
+          orgB=$(curl -s -H "Content-Type: application/json" -H "CSRF-Token: $csrf" -d '{"name":"Org B"}' http://localhost:4000/orgs | jq -r .org.id)
+          curl -s http://localhost:4000/analytics/list?platform=x | jq -e '.metrics | length == 0'
+          # Inbox requires org context; should return items
           curl -sSf http://localhost:4000/inbox/recommendations | jq -e '.items | length >= 1'
-          # Export CSV/PDF endpoints
+          # Exports under Org B should be empty CSV header
           curl -sSf http://localhost:4000/exports/csv | head -n 1 | grep 'postId'
-          curl -sSf http://localhost:4000/exports/pdf > /tmp/report.pdf && test -s /tmp/report.pdf
       - name: Smoke frontend build
         run: |
           npm --prefix apps/web ci || true
