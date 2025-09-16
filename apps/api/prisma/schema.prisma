@@ -1,0 +1,123 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Org {
+  id           String        @id @default(cuid())
+  name         String
+  memberships  Membership[]
+  prompts      PromptVersion[]
+  seeds        Seed[]
+  drafts       Draft[]
+  histories    History[]
+  metrics      Metric[]
+  schedules    Schedule[]
+  integrations Integration[]
+  createdAt    DateTime      @default(now())
+}
+
+model Membership {
+  id       String @id @default(cuid())
+  org      Org    @relation(fields: [orgId], references: [id])
+  orgId    String
+  email    String
+  role     String
+  createdAt DateTime @default(now())
+  @@index([orgId, email], name: "membership_org_email")
+}
+
+model Integration {
+  id       String @id @default(cuid())
+  org      Org    @relation(fields: [orgId], references: [id])
+  orgId    String
+  provider String
+  data     Json
+  createdAt DateTime @default(now())
+  @@index([orgId, provider], name: "integration_org_provider")
+}
+
+model PromptVersion {
+  id        String   @id @default(cuid())
+  org       Org      @relation(fields: [orgId], references: [id])
+  orgId     String
+  content   String
+  author    String
+  notes     String?
+  createdAt DateTime @default(now())
+}
+
+model Seed {
+  id        String   @id @default(cuid())
+  org       Org      @relation(fields: [orgId], references: [id])
+  orgId     String
+  title     String
+  notes     String?
+  tags      String[]
+  state     String
+  drafts    Draft[]
+  histories History[]
+  createdAt DateTime @default(now())
+}
+
+model Draft {
+  id           String   @id @default(cuid())
+  org          Org      @relation(fields: [orgId], references: [id])
+  orgId        String
+  seed         Seed     @relation(fields: [seedId], references: [id])
+  seedId       String
+  platform     String
+  originalText String
+  editedText   String?
+  histories    History[]
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model History {
+  id           String   @id @default(cuid())
+  org          Org      @relation(fields: [orgId], references: [id])
+  orgId        String
+  seed         Seed     @relation(fields: [seedId], references: [id])
+  seedId       String
+  draft        Draft    @relation(fields: [draftId], references: [id])
+  draftId      String
+  platform     String
+  postId       String
+  url          String?
+  originalText String
+  editedText   String?
+  publishedAt  DateTime @default(now())
+}
+
+model Metric {
+  id         String   @id @default(cuid())
+  org        Org      @relation(fields: [orgId], references: [id])
+  orgId      String
+  postId     String
+  platform   String
+  likes      Int
+  comments   Int
+  shares     Int
+  impressions Int?
+  at         DateTime
+}
+
+model Schedule {
+  id       String   @id @default(cuid())
+  org      Org      @relation(fields: [orgId], references: [id])
+  orgId    String
+  platform String
+  postId   String
+  runAt    DateTime
+}
