@@ -16,6 +16,21 @@ export function createOrgForUser(userEmail: string, name: string): Org {
   return org;
 }
 
+export function addMember(orgId: string, userEmail: string, role: Role) {
+  const exists = memberships.find((m) => m.orgId === orgId && m.userEmail === userEmail);
+  if (exists) {
+    exists.role = role;
+    return exists;
+  }
+  const m: Membership = { orgId, userEmail, role };
+  memberships.push(m);
+  return m;
+}
+
+export function getRole(userEmail: string, orgId: string): Role | undefined {
+  return memberships.find((m) => m.userEmail === userEmail && m.orgId === orgId)?.role;
+}
+
 export function listMembershipsForUser(userEmail: string): (Membership & { org: Org })[] {
   const ms = memberships.filter((m) => m.userEmail === userEmail);
   return ms.map((m) => ({ ...m, org: orgs.find((o) => o.id === m.orgId)! }));

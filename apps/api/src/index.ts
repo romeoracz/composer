@@ -9,7 +9,9 @@ import csrf from 'csurf';
 import { getProvidersInfo } from './providers/registry';
 import { addMetric, listMetrics } from './analytics';
 import { generateCSV, generatePDF } from './exports';
-import { createOrgForUser, getActiveOrgId, listMembershipsForUser, setActiveOrg, isUserMemberOfOrg } from './tenancy';
+import { createOrgForUser, getActiveOrgId, listMembershipsForUser, setActiveOrg, isUserMemberOfOrg, addMember, getRole } from './tenancy';
+import { addComment, approveSuggestion, canApprove, canComment, canSuggest, createSuggestion, listActivity, listComments, listSuggestions } from './collab';
+import { list as listSchedules, reschedule as reschedulePost, schedule as schedulePost } from './scheduling';
 
 const app = express();
 app.use(helmet());
@@ -79,6 +81,76 @@ app.post('/orgs/select', requireAuth, csrfProtection, (req, res) => {
   res.json({ ok: true });
 });
 
+app.post('/orgs/invite', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
+  const requester = req.session.user.email as string;
+  const role = getRole(requester, req.orgId);
+  if (role !== 'owner') return res.status(403).json({ error: 'forbidden' });
+  const { email, asRole } = req.body as { email: string; asRole: 'owner' | 'editor' | 'viewer' };
+  addMember(req.orgId, email, asRole);
+  res.json({ ok: true });
+});
+
+// Collaboration endpoints
+app.get('/collab/suggestions', requireAuth, requireOrg, (req: any, res) => {
+  res.json({ items: listSuggestions(req.orgId) });
+});
+
+app.post('/collab/suggestions', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
+  const role = getRole(req.session.user.email, req.orgId);
+  if (!canSuggest(role)) return res.status(403).json({ error: 'forbidden' });
+  const s = createSuggestion(req.orgId, String(req.body?.content || ''), req.session.user.email);
+  res.json({ suggestion: s });
+});
+
+app.post('/collab/suggestions/:id/approve', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
+  const role = getRole(req.session.user.email, req.orgId);
+  if (!canApprove(role)) return res.status(403).json({ error: 'forbidden' });
+  const s = approveSuggestion(req.orgId, req.params.id, req.session.user.email);
+  res.json({ suggestion: s });
+});
+
+app.get('/collab/suggestions/:id/comments', requireAuth, requireOrg, (req: any, res) => {
+  res.json({ items: listComments(req.orgId, req.params.id) });
+});
+
+app.post('/collab/suggestions/:id/comments', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
+  const role = getRole(req.session.user.email, req.orgId);
+  if (!canComment(role)) return res.status(403).json({ error: 'forbidden' });
+  const c = addComment(req.orgId, req.params.id, String(req.body?.text || ''), req.session.user.email);
+  res.json({ comment: c });
+});
+
+app.get('/collab/activity', requireAuth, requireOrg, (req: any, res) => {
+  res.json({ items: listActivity(req.orgId) });
+});
+
+// Scheduling endpoints
+app.get('/schedules', requireAuth, requireOrg, (req: any, res) => {
+  res.json({ items: listSchedules(req.orgId) });
+});
+
+app.post('/schedules', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
+  const { platform, postId, runAt } = req.body as { platform: string; postId: string; runAt: number };
+  try {
+    const s = schedulePost(req.orgId, { orgId: req.orgId, platform, postId, runAt });
+    res.json({ scheduled: s });
+  } catch (e: any) {
+    if (e?.message === 'conflict') return res.status(409).json({ error: 'conflict' });
+    return res.status(400).json({ error: 'bad_request' });
+  }
+});
+
+app.post('/schedules/:id/reschedule', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
+  try {
+    const s = reschedulePost(req.orgId, req.params.id, Number(req.body?.runAt));
+    res.json({ scheduled: s });
+  } catch (e: any) {
+    if (e?.message === 'conflict') return res.status(409).json({ error: 'conflict' });
+    if (e?.message === 'not_found') return res.status(404).json({ error: 'not_found' });
+    return res.status(400).json({ error: 'bad_request' });
+  }
+});
+
 // Analytics ingest
 app.post('/analytics/ingest', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
   const orgId = req.orgId as string;
@@ -143,10 +215,15 @@ app.get('/csrf-token', csrfProtection, (req, res) => {
 // Simple in-memory single admin user placeholder
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin@example.com';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'changeme';
+const USER2_EMAIL = process.env.USER2_EMAIL || 'user2@example.com';
+const USER2_PASSWORD = process.env.USER2_PASSWORD || 'changeme';
 
 app.post('/auth/login', csrfProtection, (req, res) => {
   const { email, password } = req.body as { email?: string; password?: string };
-  if (email === ADMIN_EMAIL && password === ADMIN_PASSWORD) {
+  const valid =
+    (email === ADMIN_EMAIL && password === ADMIN_PASSWORD) ||
+    (email === USER2_EMAIL && password === USER2_PASSWORD);
+  if (valid) {
     (req.session as any).user = { email };
     return res.status(200).json({ ok: true });
   }
