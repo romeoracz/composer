@@ -32,7 +32,19 @@ function isTestEndpointsEnabled() {
 
 const app = express();
 app.use(withRequestId);
-app.use(helmet());
+app.use(helmet({
+  contentSecurityPolicy: {
+    useDefaults: true,
+    directives: {
+      "default-src": ["'self'"],
+      "script-src": ["'self'"],
+      "style-src": ["'self'", "'unsafe-inline'"],
+      "img-src": ["'self'", "data:"],
+      "connect-src": ["'self'"],
+    }
+  },
+  hsts: { maxAge: 15552000, includeSubDomains: true, preload: false }
+}));
 
 // Prometheus metrics
 client.collectDefaultMetrics();
