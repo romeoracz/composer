@@ -24,6 +24,10 @@ import { getPrisma } from './prismaClient';
 import { encryptJson } from './crypto';
 import { withRequestId } from './logging';
 
+function isTestEndpointsEnabled() {
+  return (process.env.ENABLE_TEST_ENDPOINTS || 'false').toLowerCase() === 'true';
+}
+
 const app = express();
 app.use(withRequestId);
 app.use(helmet());
@@ -59,6 +63,22 @@ function requireOrg(req: any, res: any, next: any) {
   const email = req.session.user?.email;
   if (!email || !isUserMemberOfOrg(email, orgId)) return res.status(403).json({ error: 'forbidden' });
   (req as any).orgId = orgId;
+  next();
+}
+
+// Simple in-memory rate limiter for auth routes
+const authHits: Record<string, { count: number; ts: number }> = {};
+function rateLimitAuth(req: any, res: any, next: any) {
+  const key = (req.ip || 'ip') + ':' + (req.path || '');
+  const now = Date.now();
+  const windowMs = 60 * 1000;
+  const limit = 30;
+  const entry = (authHits[key] ||= { count: 0, ts: now });
+  if (now - entry.ts > windowMs) {
+    entry.ts = now; entry.count = 0;
+  }
+  entry.count += 1;
+  if (entry.count > limit) return res.status(429).json({ error: 'rate_limited' });
   next();
 }
 
@@ -129,6 +149,7 @@ app.post('/integrations/creds/:key', requireAuth, requireOrg, csrfProtection, as
 });
 
 app.post('/integrations/test/:key', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
+  if (!isTestEndpointsEnabled()) return res.status(404).json({ error: 'not_found' });
   const key = req.params.key as any;
   const result = await testConnection(req.orgId, key);
   res.json(result);
@@ -564,7 +585,7 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'changeme';
 const USER2_EMAIL = process.env.USER2_EMAIL || 'user2@example.com';
 const USER2_PASSWORD = process.env.USER2_PASSWORD || 'changeme';
 
-app.post('/auth/login', csrfProtection, (req, res) => {
+app.post('/auth/login', rateLimitAuth, csrfProtection, (req, res) => {
   const { email, password } = req.body as { email?: string; password?: string };
   const valid =
     (email === ADMIN_EMAIL && password === ADMIN_PASSWORD) ||

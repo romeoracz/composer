@@ -21,7 +21,7 @@ services:
     build:
       context: ./apps/api
     working_dir: /app
-    command: npm run dev
+    command: sh -c "npx prisma migrate deploy && npm run dev"
     environment:
       PORT: 4000
       WEB_ORIGIN: http://localhost:3000
@@ -30,6 +30,8 @@ services:
       DB_DRIVER: prisma
       QUEUE_DRIVER: bullmq
       SESSION_SECRET: devsecret
+      SECRET_ENC_KEY: dGVzdGRldmtleXRlc3RkZXZrZXl0ZXN0ZGV2a2V5dGVzdGRldmtleQ==
+      ENABLE_TEST_ENDPOINTS: "false"
       ADMIN_EMAIL: admin@example.com
       ADMIN_PASSWORD: changeme
     ports:
