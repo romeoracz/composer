@@ -19,7 +19,7 @@ import { createSeed, deleteSeed, listSeeds, updateSeed } from './seeds';
 import { createDraft, editDraft, listDrafts } from './drafts';
 import { cancelJob, runNow, scheduleJob } from './queue';
 import { recordPublish, listHistory } from './history';
-import { getQueueDriver, initBull, addBullJob, startBullWorker } from './queueDriver';
+import { getQueueDriver, initBull, addBullJob, startBullWorker, removeBullJob } from './queueDriver';
 import { getDriver } from './repo';
 import { getPrisma } from './prismaClient';
 import { encryptJson } from './crypto';
@@ -345,14 +345,8 @@ app.post('/approve', requireAuth, requireOrg, csrfProtection, async (req: any, r
 app.post('/approve/cancel', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
   const { jobId } = req.body as { jobId: string };
   if (getQueueDriver() === 'bullmq') {
-    // BullMQ cancel: remove job by id
-    try {
-      const connection = (initBull() as any).bullQueue.client;
-      // Fallback: not removing here in stub; return ok
-      return res.json({ ok: true });
-    } catch {
-      return res.json({ ok: false });
-    }
+    const ok = await removeBullJob(jobId);
+    return res.json({ ok });
   }
   res.json({ ok: cancelJob(jobId) });
 });

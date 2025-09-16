@@ -1,4 +1,4 @@
-import { Queue, Worker, QueueScheduler, JobsOptions, QueueEvents } from 'bullmq';
+import { Queue, Worker, QueueScheduler, JobsOptions, QueueEvents, Job } from 'bullmq';
 import IORedis from 'ioredis';
 
 export type QueueDriver = 'memory' | 'bullmq';
@@ -16,6 +16,7 @@ let bullScheduler: QueueScheduler | undefined;
 let bullEvents: QueueEvents | undefined;
 
 export function initBull(queueName: string = 'publishQueue') {
+  if (bullQueue) return { bullQueue, bullWorker, bullScheduler, bullEvents };
   const connection = new IORedis(process.env.REDIS_URL || 'redis://localhost:6379');
   bullQueue = new Queue(queueName, { connection });
   bullScheduler = new QueueScheduler(queueName, { connection });
@@ -24,6 +25,7 @@ export function initBull(queueName: string = 'publishQueue') {
 }
 
 export async function addBullJob(payload: any, opts?: JobsOptions) {
+  if (!bullQueue) initBull();
   if (!bullQueue) throw new Error('bull not initialized');
   return bullQueue.add('publish', payload, opts);
 }
@@ -38,4 +40,13 @@ export function startBullWorker(handler: (payload: any) => Promise<void>, queueN
     { connection }
   );
   return bullWorker;
+}
+
+export async function removeBullJob(jobId: string): Promise<boolean> {
+  if (!bullQueue) initBull();
+  if (!bullQueue) return false;
+  const job: Job | null = await bullQueue.getJob(jobId);
+  if (!job) return false;
+  await job.remove();
+  return true;
 }

@@ -30,6 +30,7 @@ services:
       REDIS_URL: redis://redis:6379
       DB_DRIVER: prisma
       QUEUE_DRIVER: bullmq
+      ENABLE_SANDBOX_PUBLISH: "true"
       SESSION_SECRET: devsecret
       SECRET_ENC_KEY: dGVzdGRldmtleXRlc3RkZXZrZXl0ZXN0ZGV2a2V5dGVzdGRldmtleQ==
       ENABLE_TEST_ENDPOINTS: "false"
