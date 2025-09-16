@@ -1,6 +1,7 @@
 import { ProviderAdapter, PublishInput, PublishResult } from './types';
 
 const ENABLED = (process.env.ENABLE_X || 'true').toLowerCase() === 'true';
+const SANDBOX = (process.env.ENABLE_SANDBOX_PUBLISH || 'false').toLowerCase() === 'true';
 
 export const xAdapter: ProviderAdapter = {
   key: 'x',
@@ -24,6 +25,9 @@ export const xAdapter: ProviderAdapter = {
     return { ok: errors.length === 0, errors };
   },
   async publish(_input: PublishInput): Promise<PublishResult> {
+    if (SANDBOX) {
+      return { platform: 'x', postId: 'sandbox_' + Math.random().toString(36).slice(2, 8), url: 'https://x.com/sandbox' };
+    }
     throw new Error('X adapter not implemented - sandbox only');
   },
 };

@@ -1,6 +1,7 @@
 import { ProviderAdapter, PublishInput, PublishResult } from './types';
 
 const ENABLED = (process.env.ENABLE_LINKEDIN || 'true').toLowerCase() === 'true';
+const SANDBOX = (process.env.ENABLE_SANDBOX_PUBLISH || 'false').toLowerCase() === 'true';
 
 export const linkedinAdapter: ProviderAdapter = {
   key: 'linkedin',
@@ -23,7 +24,10 @@ export const linkedinAdapter: ProviderAdapter = {
     }
     return { ok: errors.length === 0, errors };
   },
-  async publish(_input: PublishInput): Promise<PublishResult> {
+  async publish(input: PublishInput): Promise<PublishResult> {
+    if (SANDBOX) {
+      return { platform: 'linkedin', postId: 'sandbox_' + Math.random().toString(36).slice(2, 8), url: 'https://linkedin.com/feed/update/sandbox' };
+    }
     throw new Error('LinkedIn adapter not implemented - sandbox only');
   },
 };
