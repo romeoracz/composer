@@ -9,7 +9,7 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
   try {
-    const res = await fetch(`${process.env.NEXT_PUBLIC_API_ORIGIN || 'http://localhost:4000'}/auth/me`, {
+    const res = await fetch(`${request.nextUrl.origin}/api/auth/me`, {
       headers: { cookie: request.headers.get('cookie') || '' },
       cache: 'no-store',
       credentials: 'include' as any,

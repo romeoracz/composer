@@ -9,7 +9,10 @@ import csrf from 'csurf';
 
 const app = express();
 app.use(helmet());
-app.use(cors({ origin: true, credentials: true }));
+
+const WEB_ORIGIN = process.env.WEB_ORIGIN || 'http://localhost:3000';
+app.use(cors({ origin: WEB_ORIGIN, credentials: true }));
+
 app.use(express.json());
 app.use(cookieParser());
 
@@ -25,7 +28,7 @@ app.use(
   })
 );
 
-const csrfProtection = csrf({ cookie: true });
+const csrfProtection = csrf({ cookie: { httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production' } });
 
 app.get('/health', (_req, res) => {
   res.status(200).json({ status: 'ok' });

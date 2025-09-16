@@ -21,11 +21,18 @@ jobs:
       - run: npm run test --if-present
       - run: npm run build --if-present
       - name: Smoke backend
+        env:
+          WEB_ORIGIN: http://localhost:3000
+          SESSION_SECRET: testsecret
+          ADMIN_EMAIL: admin@example.com
+          ADMIN_PASSWORD: changeme
         run: |
           npm --prefix apps/api ci || true
           node apps/api/node_modules/.bin/ts-node -e "require('./apps/api/src/index')" &
           sleep 2
-          curl -sSf http://localhost:4000/health | tee /dev/stderr | grep '"status":"ok"'
+          curl -s -o /dev/null -w "%{http_code}" http://localhost:4000/auth/me | grep 401
+          csrf=$(curl -s http://localhost:4000/csrf-token | jq -r .csrfToken)
+          curl -s -H "Content-Type: application/json" -H "CSRF-Token: $csrf" -d '{"email":"admin@example.com","password":"changeme"}' http://localhost:4000/auth/login | jq -e .ok
       - name: Smoke frontend build
         run: |
           npm --prefix apps/web ci || true
