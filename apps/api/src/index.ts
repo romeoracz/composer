@@ -117,17 +117,38 @@ app.post('/integrations/test/:key', requireAuth, requireOrg, csrfProtection, asy
 });
 
 // Master Prompt (Stage 3)
-app.get('/prompts', requireAuth, requireOrg, (req: any, res) => {
+app.get('/prompts', requireAuth, requireOrg, async (req: any, res) => {
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    const versions = await prisma.promptVersion.findMany({ where: { orgId: req.orgId }, orderBy: { createdAt: 'desc' } });
+    const active = versions[0] || null; // latest as active placeholder
+    return res.json({ versions, active });
+  }
   res.json({ versions: listVersions(req.orgId), active: getActive(req.orgId) });
 });
 
-app.post('/prompts', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
-  const v = createVersion(req.orgId, req.session.user.email, String(req.body?.content || ''), req.body?.notes);
+app.post('/prompts', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
+  const content = String(req.body?.content || '');
+  const notes = req.body?.notes as string | undefined;
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    const version = await prisma.promptVersion.create({ data: { orgId: req.orgId, content, notes, author: req.session.user.email } });
+    return res.json({ version });
+  }
+  const v = createVersion(req.orgId, req.session.user.email, content, notes);
   res.json({ version: v });
 });
 
-app.post('/prompts/activate', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
-  const v = activate(req.orgId, String(req.body?.id || ''));
+app.post('/prompts/activate', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
+  const id = String(req.body?.id || '');
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    // No explicit active pointer in schema; return version for now
+    const version = await prisma.promptVersion.findUnique({ where: { id } });
+    if (!version || version.orgId !== req.orgId) return res.status(404).json({ error: 'not_found' });
+    return res.json({ version });
+  }
+  const v = activate(req.orgId, id);
   if (!v) return res.status(404).json({ error: 'not_found' });
   res.json({ version: v });
 });
@@ -185,8 +206,21 @@ function generateTextFromSeed(seedTitle: string, prompt?: string, platform?: str
   return base.slice(0, 1000);
 }
 
-app.post('/drafts/generate', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
+app.post('/drafts/generate', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
   const { seedId, platforms } = req.body as { seedId: string; platforms: string[] };
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    const seed = await prisma.seed.findUnique({ where: { id: seedId } });
+    if (!seed || seed.orgId !== req.orgId) return res.status(404).json({ error: 'seed_not_found' });
+    const latestPrompt = await prisma.promptVersion.findFirst({ where: { orgId: req.orgId }, orderBy: { createdAt: 'desc' } });
+    const drafts = [] as any[];
+    for (const p of platforms || []) {
+      const text = generateTextFromSeed(seed.title, latestPrompt?.content, p);
+      const d = await prisma.draft.create({ data: { orgId: req.orgId, seedId, platform: p, originalText: text } });
+      drafts.push(d);
+    }
+    return res.json({ drafts });
+  }
   const seed = listSeeds(req.orgId).find((s) => s.id === seedId);
   const prompt = getActive(req.orgId)?.content;
   if (!seed) return res.status(404).json({ error: 'seed_not_found' });
@@ -194,12 +228,23 @@ app.post('/drafts/generate', requireAuth, requireOrg, csrfProtection, (req: any,
   res.json({ drafts });
 });
 
-app.get('/drafts', requireAuth, requireOrg, (req: any, res) => {
+app.get('/drafts', requireAuth, requireOrg, async (req: any, res) => {
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    const items = await prisma.draft.findMany({ where: { orgId: req.orgId, ...(req.query.seedId ? { seedId: String(req.query.seedId) } : {}) }, orderBy: { createdAt: 'desc' } });
+    return res.json({ items });
+  }
   res.json({ items: listDrafts(req.orgId, req.query.seedId as string | undefined) });
 });
 
-app.post('/drafts/:id/edit', requireAuth, requireOrg, csrfProtection, (req: any, res) => {
-  const d = editDraft(req.orgId, req.params.id, String(req.body?.text || ''));
+app.post('/drafts/:id/edit', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
+  const text = String(req.body?.text || '');
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    const draft = await prisma.draft.update({ where: { id: req.params.id }, data: { editedText: text } });
+    return res.json({ draft });
+  }
+  const d = editDraft(req.orgId, req.params.id, text);
   if (!d) return res.status(404).json({ error: 'not_found' });
   res.json({ draft: d });
 });
@@ -246,9 +291,15 @@ app.post('/approve/cancel', requireAuth, requireOrg, csrfProtection, async (req:
 app.post('/publish/run-now', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
   const { jobId } = req.body as { jobId: string };
   if (getQueueDriver() === 'bullmq') {
-    // Directly publish using payload in request (simulate run-now)
     const orgId = req.orgId as string;
     const draftId = String(req.body?.draftId || '');
+    if (getDriver() === 'prisma') {
+      const prisma = getPrisma();
+      const draft = await prisma.draft.findUnique({ where: { id: draftId } });
+      if (!draft || draft.orgId !== orgId) return res.status(404).json({ error: 'draft_not_found' });
+      const published = await prisma.history.create({ data: { orgId, seedId: draft.seedId, draftId: draft.id, platform: draft.platform, postId: 'post_' + draft.id, originalText: draft.originalText, editedText: draft.editedText || null } });
+      return res.json({ published });
+    }
     const draft = listDrafts(orgId).find((d) => d.id === draftId);
     if (!draft) return res.status(404).json({ error: 'draft_not_found' });
     const hist = recordPublish({
@@ -265,10 +316,15 @@ app.post('/publish/run-now', requireAuth, requireOrg, csrfProtection, async (req
   const job = runNow(jobId);
   if (!job) return res.status(404).json({ error: 'job_not_found' });
   const orgId = req.orgId as string;
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    const draft = await prisma.draft.findUnique({ where: { id: String(job.payload?.draftId) } });
+    if (!draft || draft.orgId !== orgId) return res.status(404).json({ error: 'draft_not_found' });
+    const published = await prisma.history.create({ data: { orgId, seedId: draft.seedId, draftId: draft.id, platform: draft.platform, postId: 'post_' + draft.id, originalText: draft.originalText, editedText: draft.editedText || null } });
+    return res.json({ published });
+  }
   const draft = listDrafts(orgId).find((d) => d.id === job.payload?.draftId);
   if (!draft) return res.status(404).json({ error: 'draft_not_found' });
-  const text = draft.editedText || draft.originalText;
-  // Stub publish: record history with fake postId
   const hist = recordPublish({
     orgId,
     seedId: draft.seedId,
@@ -281,7 +337,12 @@ app.post('/publish/run-now', requireAuth, requireOrg, csrfProtection, async (req
   res.json({ published: hist });
 });
 
-app.get('/history', requireAuth, requireOrg, (req: any, res) => {
+app.get('/history', requireAuth, requireOrg, async (req: any, res) => {
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    const items = await prisma.history.findMany({ where: { orgId: req.orgId }, orderBy: { publishedAt: 'desc' } });
+    return res.json({ items });
+  }
   res.json({ items: listHistory(req.orgId) });
 });
 
@@ -384,6 +445,14 @@ if (getQueueDriver() === 'bullmq') {
     if (payload?.type === 'publish') {
       const orgId = payload.orgId as string;
       const draftId = payload.draftId as string;
+      if (getDriver() === 'prisma') {
+        const prisma = getPrisma();
+        const draft = await prisma.draft.findUnique({ where: { id: draftId } });
+        if (draft && draft.orgId === orgId) {
+          await prisma.history.create({ data: { orgId, seedId: draft.seedId, draftId: draft.id, platform: draft.platform, postId: 'post_' + draft.id, originalText: draft.originalText, editedText: draft.editedText || null } });
+        }
+        return;
+      }
       const draft = listDrafts(orgId).find((d) => d.id === draftId);
       if (draft) {
         recordPublish({
