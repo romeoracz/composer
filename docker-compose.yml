@@ -25,6 +25,7 @@ services:
     environment:
       PORT: 4000
       WEB_ORIGIN: http://localhost:3000
+      REDIRECT_BASE_URL: http://localhost:4000
       DATABASE_URL: postgresql://postgres:postgres@db:5432/composr
       REDIS_URL: redis://redis:6379
       DB_DRIVER: prisma
@@ -34,6 +35,10 @@ services:
       ENABLE_TEST_ENDPOINTS: "false"
       ADMIN_EMAIL: admin@example.com
       ADMIN_PASSWORD: changeme
+      LINKEDIN_CLIENT_ID: ""
+      LINKEDIN_CLIENT_SECRET: ""
+      X_CLIENT_ID: ""
+      X_CLIENT_SECRET: ""
     ports:
       - "4000:4000"
     volumes:

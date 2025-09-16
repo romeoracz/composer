@@ -24,6 +24,7 @@ import { getDriver } from './repo';
 import { getPrisma } from './prismaClient';
 import { encryptJson } from './crypto';
 import { withRequestId } from './logging';
+import { oauthStart, oauthCallback } from './oauth';
 
 function isTestEndpointsEnabled() {
   return (process.env.ENABLE_TEST_ENDPOINTS || 'false').toLowerCase() === 'true';
@@ -625,6 +626,10 @@ app.get('/auth/me', (req, res) => {
   if (!user) return res.status(401).json({ authenticated: false });
   res.json({ authenticated: true, user });
 });
+
+// OAuth scaffolding
+app.get('/oauth/:provider/start', requireAuth, requireOrg, oauthStart);
+app.get('/oauth/:provider/callback', oauthCallback);
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
