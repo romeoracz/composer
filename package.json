@@ -14,9 +14,14 @@
     "typecheck": "npm run -ws typecheck",
     "format": "npm run -ws format",
     "security": "npm run -ws audit",
-    "ci": "npm run lint && npm run typecheck && npm run test && npm run build"
+    "ci": "npm run lint && npm run typecheck && npm run test && npm run build",
+    "prepare": "echo 'husky placeholder'"
   },
   "engines": {
     "node": ">=20"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "19.5.0",
+    "@commitlint/config-conventional": "19.5.0"
   }
 }
