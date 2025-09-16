@@ -6,6 +6,9 @@ import { WebSocketServer } from 'ws';
 import cookieSession from 'cookie-session';
 import cookieParser from 'cookie-parser';
 import csrf from 'csurf';
+import { getProvidersInfo } from './providers/registry';
+import { addMetric, listMetrics } from './analytics';
+import { generateCSV, generatePDF } from './exports';
 
 const app = express();
 app.use(helmet());
@@ -32,6 +35,64 @@ const csrfProtection = csrf({ cookie: { httpOnly: true, sameSite: 'lax', secure:
 
 app.get('/health', (_req, res) => {
   res.status(200).json({ status: 'ok' });
+});
+
+app.get('/providers', (_req, res) => {
+  res.json({ providers: getProvidersInfo() });
+});
+
+// Analytics ingest
+app.post('/analytics/ingest', csrfProtection, (req, res) => {
+  addMetric(req.body);
+  res.json({ ok: true });
+});
+
+app.get('/analytics/list', (req, res) => {
+  const { platform, from, to } = req.query as any;
+  const parsed = listMetrics({
+    platform,
+    from: from ? Number(from) : undefined,
+    to: to ? Number(to) : undefined,
+  });
+  res.json({ metrics: parsed });
+});
+
+// Exports
+app.get('/exports/csv', (req, res) => {
+  const { platform, from, to } = req.query as any;
+  const csv = generateCSV({ platform, from: from ? Number(from) : undefined, to: to ? Number(to) : undefined });
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename="analytics.csv"');
+  res.send(csv);
+});
+
+app.get('/exports/pdf', async (req, res) => {
+  const { platform, from, to } = req.query as any;
+  const pdf = await generatePDF({ platform, from: from ? Number(from) : undefined, to: to ? Number(to) : undefined });
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', 'attachment; filename="analytics.pdf"');
+  res.send(pdf);
+});
+
+// Inbox fixtures and recommendations (stub classifier)
+const inboxFixtures = [
+  { id: 'm1', subject: 'Product launch next week', body: 'Draft your announcement.' },
+  { id: 'm2', subject: 'Industry report: AI trends', body: 'Key takeaways for your audience.' },
+  { id: 'm3', subject: 'Team milestone', body: 'We shipped v1.2' }
+];
+
+function classifyRelevant(message: { subject: string; body: string }) {
+  const text = `${message.subject} ${message.body}`.toLowerCase();
+  const score = (text.includes('launch') ? 0.5 : 0) + (text.includes('report') ? 0.3 : 0) + (text.includes('milestone') ? 0.2 : 0);
+  return score; // 0..1
+}
+
+app.get('/inbox/recommendations', (_req, res) => {
+  const recs = inboxFixtures
+    .map((m) => ({ ...m, score: classifyRelevant(m) }))
+    .filter((m) => m.score >= 0.3)
+    .sort((a, b) => b.score - a.score);
+  res.json({ items: recs });
 });
 
 // CSRF token endpoint

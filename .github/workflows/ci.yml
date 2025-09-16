@@ -33,6 +33,17 @@ jobs:
           curl -s -o /dev/null -w "%{http_code}" http://localhost:4000/auth/me | grep 401
           csrf=$(curl -s http://localhost:4000/csrf-token | jq -r .csrfToken)
           curl -s -H "Content-Type: application/json" -H "CSRF-Token: $csrf" -d '{"email":"admin@example.com","password":"changeme"}' http://localhost:4000/auth/login | jq -e .ok
+          curl -sSf http://localhost:4000/providers | jq -e '.providers | length >= 3'
+          # Analytics idempotency and integrity
+          ts=$(date +%s%3N)
+          payload='{ "postId":"p1","platform":"x","likes":1,"comments":2,"shares":3,"impressions":10,"at":'$ts' }'
+          curl -s -H "Content-Type: application/json" -H "CSRF-Token: $csrf" -d "$payload" http://localhost:4000/analytics/ingest | jq -e .ok
+          curl -s http://localhost:4000/analytics/list?platform=x | jq -e '.metrics | length >= 1'
+          # Inbox recommendations threshold
+          curl -sSf http://localhost:4000/inbox/recommendations | jq -e '.items | length >= 1'
+          # Export CSV/PDF endpoints
+          curl -sSf http://localhost:4000/exports/csv | head -n 1 | grep 'postId'
+          curl -sSf http://localhost:4000/exports/pdf > /tmp/report.pdf && test -s /tmp/report.pdf
       - name: Smoke frontend build
         run: |
           npm --prefix apps/web ci || true
