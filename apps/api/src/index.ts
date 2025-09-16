@@ -6,6 +6,7 @@ import { WebSocketServer } from 'ws';
 import cookieSession from 'cookie-session';
 import cookieParser from 'cookie-parser';
 import csrf from 'csurf';
+import client from 'prom-client';
 import { getProvidersInfo, getAdapterByKey } from './providers/registry';
 import { addMetric, listMetrics } from './analytics';
 import { generateCSV, generatePDF } from './exports';
@@ -31,6 +32,23 @@ function isTestEndpointsEnabled() {
 const app = express();
 app.use(withRequestId);
 app.use(helmet());
+
+// Prometheus metrics
+client.collectDefaultMetrics();
+const httpReqDuration = new client.Histogram({ name: 'http_request_duration_ms', help: 'HTTP request duration ms', labelNames: ['method', 'path', 'status'], buckets: [5, 10, 25, 50, 100, 250, 500, 1000] });
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    httpReqDuration.labels(req.method, req.path, String(res.statusCode)).observe(duration);
+  });
+  next();
+});
+
+app.get('/metrics', async (_req, res) => {
+  res.setHeader('Content-Type', client.register.contentType);
+  res.end(await client.register.metrics());
+});
 
 const WEB_ORIGIN = process.env.WEB_ORIGIN || 'http://localhost:3000';
 app.use(cors({ origin: WEB_ORIGIN, credentials: true }));
