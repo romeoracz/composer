@@ -629,7 +629,16 @@ app.get('/auth/me', (req, res) => {
 
 // OAuth scaffolding
 app.get('/oauth/:provider/start', requireAuth, requireOrg, oauthStart);
-app.get('/oauth/:provider/callback', oauthCallback);
+app.get('/oauth/:provider/callback', requireAuth, requireOrg, async (req: any, res) => {
+  const provider = req.params.provider as string;
+  // In production: exchange code for tokens. Here we persist a stub token payload encrypted
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    const data = encryptJson({ accessToken: 'stub', refreshToken: 'stub', obtainedAt: Date.now() });
+    await prisma.integration.upsert({ where: { orgId_provider: { orgId: req.orgId, provider } }, update: { data }, create: { orgId: req.orgId, provider, data } });
+  }
+  return res.json({ ok: true });
+});
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
