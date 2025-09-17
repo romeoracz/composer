@@ -19,3 +19,8 @@ ALTER TABLE "ApprovalJob"
 
 ALTER TABLE "ApprovalJob"
   ADD CONSTRAINT "ApprovalJob_draftId_fkey" FOREIGN KEY ("draftId") REFERENCES "Draft"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- Extend history records with status and error
+ALTER TABLE "History"
+  ADD COLUMN "status" TEXT NOT NULL DEFAULT 'success',
+  ADD COLUMN "error" TEXT;

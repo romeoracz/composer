@@ -117,6 +117,7 @@ export default function ReviewPage() {
   const [validating, setValidating] = useState(false);
   const [savingDraft, setSavingDraft] = useState(false);
   const [undoBusy, setUndoBusy] = useState(false);
+  const [nowTick, setNowTick] = useState(() => Date.now());
 
   const availableTags = useMemo(() => {
     const set = new Set<string>();
@@ -248,6 +249,11 @@ export default function ReviewPage() {
   useEffect(() => {
     loadSeeds();
   }, [loadSeeds]);
+
+  useEffect(() => {
+    const interval = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     async function fetchProviders() {
@@ -547,7 +553,10 @@ export default function ReviewPage() {
         body: JSON.stringify({ draftId, delayMs: 5000 }),
       });
       if (!response.ok) throw new Error("approve_failed");
+      const data = await response.json();
       setMessage("Draft queued for publish");
+      if (selectedSeedId) await loadDrafts(selectedSeedId);
+      if (draftId === selectedDraftId) await loadDraftDetails(draftId);
     } catch (err) {
       console.error(err);
       setMessage("Unable to approve draft");
@@ -853,7 +862,7 @@ export default function ReviewPage() {
                             >
                               <span>
                                 Approval status: {draftDetails.approvalJob.status}
-                                {draftDetails.approvalJob.status === "pending" && ` • ${formatCountdown(draftDetails.approvalJob.runAt)}`}
+                                {draftDetails.approvalJob.status === "pending" && ` • ${formatCountdown(draftDetails.approvalJob.runAt, nowTick)}`}
                               </span>
                               {draftDetails.approvalJob.status === "pending" && (
                                 <button
@@ -1027,8 +1036,8 @@ function formatTimestamp(value: number) {
   }
 }
 
-function formatCountdown(runAt: number) {
-  const diff = runAt - Date.now();
+function formatCountdown(runAt: number, reference: number = Date.now()) {
+  const diff = runAt - reference;
   if (diff <= 0) return "due now";
   const minutes = Math.floor(diff / 60000);
   const seconds = Math.floor((diff % 60000) / 1000);

@@ -1,4 +1,4 @@
-type JobStatus = 'pending' | 'cancelled' | 'completed';
+type JobStatus = 'pending' | 'cancelled' | 'completed' | 'failed';
 
 type Job = {
   id: string;
@@ -48,6 +48,13 @@ export function markCompleted(id: string): Job | undefined {
   const job = jobsById.get(id);
   if (!job) return undefined;
   job.status = 'completed';
+  return job;
+}
+
+export function markFailed(id: string): Job | undefined {
+  const job = jobsById.get(id);
+  if (!job) return undefined;
+  job.status = 'failed';
   return job;
 }
 

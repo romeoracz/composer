@@ -139,6 +139,8 @@ model History {
   originalText String
   editedText   String?
   publishedAt  DateTime @default(now())
+  status       String   @default("success")
+  error        String?
 }
 
 model Metric {

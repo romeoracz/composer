@@ -17,7 +17,7 @@ import { createSecretRecord, decryptRecord, hydrateSecretRecord, redact, seriali
 import { activate, createVersion, getActive, listVersions, PromptVersion } from './prompts';
 import { createSeed, deleteSeed, listSeeds, updateSeed } from './seeds';
 import { createDraft, editDraft, listDrafts, listDraftAudits } from './drafts';
-import { cancelJob, runNow, scheduleJob, getJobsForOrg, getJobForDraft, rescheduleJob, markCompleted } from './queue';
+import { cancelJob, runNow, scheduleJob, getJobsForOrg, getJobForDraft, rescheduleJob, markCompleted, markFailed, dueJobs } from './queue';
 import { recordPublish, listHistory } from './history';
 import { getQueueDriver, initBull, addBullJob, startBullWorker, removeBullJob } from './queueDriver';
 import { getDriver } from './repo';
@@ -50,7 +50,7 @@ const VALID_SEED_STATES: SeedState[] = ['draft', 'ready'];
 const SUPPORTED_PLATFORMS = ['linkedin', 'x', 'instagram', 'facebook', 'tiktok'];
 const APPROVAL_DEFAULT_DELAY_MS = Number(process.env.APPROVAL_DELAY_MS || 7 * 60 * 1000);
 
-type ApprovalJobStatus = 'pending' | 'cancelled' | 'completed';
+type ApprovalJobStatus = 'pending' | 'cancelled' | 'completed' | 'failed';
 
 type ApprovalJobView = {
   id: string;
@@ -263,7 +263,7 @@ async function updateApprovalJobStatus(orgId: string, draftId: string, status: A
 async function scheduleApprovalJob(orgId: string, draftId: string, delayMs: number, payload: any) {
   const queueDriver = getQueueDriver();
   if (queueDriver === 'bullmq') {
-    const job = await addBullJob(payload, { delay: delayMs, attempts: 3, backoff: { type: 'exponential', delay: 2000 } });
+    const job = await addBullJob(payload, { delay: delayMs, attempts: 1, backoff: { type: 'exponential', delay: 2000 } });
     const runAt = Date.now() + delayMs;
     const jobId = job.id?.toString();
     if (!jobId) throw new Error('job_id_missing');
@@ -287,7 +287,7 @@ async function rescheduleApproval(orgId: string, draftId: string, currentJob: Ap
   const queueDriver = getQueueDriver();
   if (queueDriver === 'bullmq') {
     await removeBullJob(currentJob.jobId);
-    const job = await addBullJob(payload, { delay: delayMs, attempts: 3, backoff: { type: 'exponential', delay: 2000 } });
+    const job = await addBullJob(payload, { delay: delayMs, attempts: 1, backoff: { type: 'exponential', delay: 2000 } });
     const runAt = Date.now() + delayMs;
     const jobId = job.id?.toString();
     if (!jobId) throw new Error('job_id_missing');
@@ -710,6 +710,97 @@ async function buildDraftResponse(orgId: string, drafts: any[]) {
   );
 }
 
+async function publishDraft(orgId: string, draftId: string) {
+  const driver = getDriver();
+  const prisma = driver === 'prisma' ? getPrisma() : null;
+  let draft: any;
+  if (driver === 'prisma') {
+    draft = await prisma!.draft.findUnique({ where: { id: draftId } });
+    if (!draft || draft.orgId !== orgId) throw new Error('draft_not_found');
+  } else {
+    draft = listDrafts(orgId).find((d) => d.id === draftId);
+    if (!draft) throw new Error('draft_not_found');
+  }
+
+  const adapter = getAdapterByKey(draft.platform);
+  if (!adapter || !adapter.isEnabled()) throw new Error('adapter_disabled');
+
+  const textSource = (draft.editedText && draft.editedText.trim().length > 0 ? draft.editedText : draft.originalText) as string;
+  const validation = adapter.validateDraft({ text: textSource });
+  if (!validation.ok) {
+    throw new Error(validation.errors.join(', ') || 'validation_failed');
+  }
+
+  try {
+    const result = await adapter.publish({ text: textSource });
+    const postId = result.postId || `post_${draftId}_${Date.now()}`;
+    if (driver === 'prisma') {
+      await prisma!.history.create({
+        data: {
+          orgId,
+          seedId: draft.seedId,
+          draftId,
+          platform: draft.platform,
+          postId,
+          url: result.url ?? null,
+          originalText: draft.originalText,
+          editedText: draft.editedText ?? null,
+          status: 'success',
+          error: null,
+        },
+      });
+    } else {
+      recordPublish({
+        orgId,
+        seedId: draft.seedId,
+        draftId,
+        platform: draft.platform,
+        postId,
+        url: result.url ?? undefined,
+        originalText: draft.originalText,
+        editedText: draft.editedText ?? undefined,
+        status: 'success',
+        error: null,
+      });
+    }
+    await updateApprovalJobStatus(orgId, draftId, 'completed');
+    return { postId, url: result.url ?? null };
+  } catch (err: any) {
+    const message = err?.message || 'publish_failed';
+    if (driver === 'prisma') {
+      await prisma!.history.create({
+        data: {
+          orgId,
+          seedId: draft.seedId,
+          draftId,
+          platform: draft.platform,
+          postId: `failed_${draftId}_${Date.now()}`,
+          url: null,
+          originalText: draft.originalText,
+          editedText: draft.editedText ?? null,
+          status: 'failed',
+          error: message,
+        },
+      });
+    } else {
+      recordPublish({
+        orgId,
+        seedId: draft.seedId,
+        draftId,
+        platform: draft.platform,
+        postId: `failed_${draftId}_${Date.now()}`,
+        url: undefined,
+        originalText: draft.originalText,
+        editedText: draft.editedText ?? undefined,
+        status: 'failed',
+        error: message,
+      });
+    }
+    await updateApprovalJobStatus(orgId, draftId, 'failed');
+    throw err;
+  }
+}
+
 app.post('/drafts/generate', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
   const { seedId, platforms } = req.body as { seedId: string; platforms?: string[] };
   const orgId = req.orgId as string;
@@ -946,58 +1037,61 @@ app.post('/approve/cancel', requireAuth, requireOrg, csrfProtection, async (req:
 
 // Publish and History (Stage 8)
 app.post('/publish/run-now', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
-  const { jobId } = req.body as { jobId: string };
-  if (getQueueDriver() === 'bullmq') {
-    const orgId = req.orgId as string;
-    const draftId = String(req.body?.draftId || '');
-    if (getDriver() === 'prisma') {
-      const prisma = getPrisma();
-      const draft = await prisma.draft.findUnique({ where: { id: draftId } });
-      if (!draft || draft.orgId !== orgId) return res.status(404).json({ error: 'draft_not_found' });
-      const published = await prisma.history.create({ data: { orgId, seedId: draft.seedId, draftId: draft.id, platform: draft.platform, postId: 'post_' + draft.id, originalText: draft.originalText, editedText: draft.editedText || null } });
-      await updateApprovalJobStatus(orgId, draft.id, 'completed');
-      return res.json({ published });
-    }
-    const draft = listDrafts(orgId).find((d) => d.id === draftId);
-    if (!draft) return res.status(404).json({ error: 'draft_not_found' });
-    const hist = recordPublish({
-      orgId,
-      seedId: draft.seedId,
-      draftId: draft.id,
-      platform: draft.platform,
-      postId: 'post_' + draft.id,
-      originalText: draft.originalText,
-      editedText: draft.editedText,
-    });
-    await updateApprovalJobStatus(orgId, draftId, 'completed');
-    return res.json({ published: hist });
-  }
-  const job = runNow(jobId);
-  if (!job) return res.status(404).json({ error: 'job_not_found' });
+  const { jobId, draftId } = req.body as { jobId?: string; draftId?: string };
   const orgId = req.orgId as string;
-  if (getDriver() === 'prisma') {
-    const prisma = getPrisma();
-    const draft = await prisma.draft.findUnique({ where: { id: String(job.payload?.draftId) } });
-    if (!draft || draft.orgId !== orgId) return res.status(404).json({ error: 'draft_not_found' });
-    const published = await prisma.history.create({ data: { orgId, seedId: draft.seedId, draftId: draft.id, platform: draft.platform, postId: 'post_' + draft.id, originalText: draft.originalText, editedText: draft.editedText || null } });
-    markCompleted(jobId);
-    await updateApprovalJobStatus(orgId, draft.id, 'completed');
-    return res.json({ published });
+  let targetDraftId = draftId ? String(draftId) : undefined;
+  try {
+    if (getQueueDriver() === 'bullmq') {
+      if (!targetDraftId) return res.status(400).json({ error: 'draftId_required' });
+      const result = await publishDraft(orgId, targetDraftId);
+      if (jobId) await removeBullJob(jobId);
+      return res.json({ ok: true, result });
+    }
+    let processedJobId: string | undefined;
+    if (jobId) {
+      const job = runNow(jobId);
+      if (!job) return res.status(404).json({ error: 'job_not_found' });
+      processedJobId = job.id;
+      if (!targetDraftId) {
+        targetDraftId = String(job.payload?.draftId || '');
+      }
+    }
+    if (!targetDraftId) return res.status(400).json({ error: 'draftId_required' });
+    const result = await publishDraft(orgId, targetDraftId);
+    if (processedJobId) markCompleted(processedJobId);
+    return res.json({ ok: true, result });
+  } catch (err) {
+    if (jobId) markFailed(jobId);
+    const message = (err as any)?.message || 'publish_failed';
+    return res.status(500).json({ error: message });
   }
-  const draft = listDrafts(orgId).find((d) => d.id === job.payload?.draftId);
-  if (!draft) return res.status(404).json({ error: 'draft_not_found' });
-  const hist = recordPublish({
-    orgId,
-    seedId: draft.seedId,
-    draftId: draft.id,
-    platform: draft.platform,
-    postId: 'post_' + draft.id,
-    originalText: draft.originalText,
-    editedText: draft.editedText,
-  });
-  markCompleted(jobId);
-  await updateApprovalJobStatus(orgId, draft.id, 'completed');
-  res.json({ published: hist });
+});
+
+
+app.post('/publish/process-due', requireAuth, csrfProtection, async (req: any, res) => {
+  if (getQueueDriver() === 'bullmq') {
+    return res.json({ driver: 'bullmq', processed: 0 });
+  }
+  const processed: Array<{ jobId: string; draftId?: string; status: string; error?: string }> = [];
+  const due = dueJobs();
+  for (const job of due) {
+    const draftId = job.payload?.draftId ? String(job.payload.draftId) : undefined;
+    if (!draftId) {
+      markFailed(job.id);
+      processed.push({ jobId: job.id, status: 'failed', error: 'draftId_missing' });
+      continue;
+    }
+    try {
+      await publishDraft(job.orgId, draftId);
+      markCompleted(job.id);
+      processed.push({ jobId: job.id, draftId, status: 'success' });
+    } catch (err: any) {
+      markFailed(job.id);
+      const message = err?.message || 'publish_failed';
+      processed.push({ jobId: job.id, draftId, status: 'failed', error: message });
+    }
+  }
+  res.json({ processed });
 });
 
 app.get('/history', requireAuth, requireOrg, async (req: any, res) => {
@@ -1250,32 +1344,15 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 
 if (getQueueDriver() === 'bullmq') {
   initBull();
-  startBullWorker(async (payload) => {
-    if (payload?.type === 'publish') {
-      const orgId = payload.orgId as string;
-      const draftId = payload.draftId as string;
-      if (getDriver() === 'prisma') {
-        const prisma = getPrisma();
-        const draft = await prisma.draft.findUnique({ where: { id: draftId } });
-        if (draft && draft.orgId === orgId) {
-          await prisma.history.create({ data: { orgId, seedId: draft.seedId, draftId: draft.id, platform: draft.platform, postId: 'post_' + draft.id, originalText: draft.originalText, editedText: draft.editedText || null } });
-        }
-        return;
+  const globalAny = global as any;
+  if (!globalAny.__composrPublishWorkerStarted) {
+    startBullWorker(async (payload) => {
+      if (payload?.type === 'publish') {
+        await publishDraft(String(payload.orgId), String(payload.draftId));
       }
-      const draft = listDrafts(orgId).find((d) => d.id === draftId);
-      if (draft) {
-        recordPublish({
-          orgId,
-          seedId: draft.seedId,
-          draftId: draft.id,
-          platform: draft.platform,
-          postId: 'post_' + draft.id,
-          originalText: draft.originalText,
-          editedText: draft.editedText,
-        });
-      }
-    }
-  });
+    });
+    globalAny.__composrPublishWorkerStarted = true;
+  }
 }
 
 wss.on('connection', (ws) => {

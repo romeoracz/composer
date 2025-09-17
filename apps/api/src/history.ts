@@ -9,6 +9,8 @@ export type HistoryItem = {
   originalText: string;
   editedText?: string;
   publishedAt: number;
+  status: 'success' | 'failed' | 'cancelled';
+  error?: string | null;
 };
 
 const historyByOrg: Record<string, HistoryItem[]> = {};
@@ -17,8 +19,15 @@ function genId(prefix: string) {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
-export function recordPublish(input: Omit<HistoryItem, 'id' | 'publishedAt'>) {
-  const item: HistoryItem = { id: genId('hist'), publishedAt: Date.now(), ...input } as HistoryItem;
+export function recordPublish(input: Omit<HistoryItem, 'id' | 'publishedAt'> & { status?: HistoryItem['status']; error?: string | null }) {
+  const { status = 'success', error = null, ...rest } = input;
+  const item: HistoryItem = {
+    id: genId('hist'),
+    publishedAt: Date.now(),
+    status,
+    error,
+    ...rest,
+  } as HistoryItem;
   (historyByOrg[input.orgId] ||= []).push(item);
   return item;
 }

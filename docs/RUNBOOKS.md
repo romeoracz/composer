@@ -32,6 +32,8 @@ These runbooks cover the current ComposR MVP stack: seed intake, prompt versioni
 - Default queue driver is memory; BullMQ requires Redis + `QUEUE_DRIVER=bullmq`.
 - Symptoms: job not scheduled, cancel ineffective.
 - Fix: check queue driver config, ensure Redis URL reachable.
+- Memory driver: process pending jobs via `POST /publish/process-due` (requires auth + CSRF token). Schedule this via cron if needed.
+- BullMQ driver: worker spins up automatically on API start; check Redis logs if publish attempts stall.
 
 ## Integrations Secrets
 - Endpoint: `/integrations/*`.
