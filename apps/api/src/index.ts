@@ -1037,36 +1037,32 @@ app.post('/approve/cancel', requireAuth, requireOrg, csrfProtection, async (req:
 
 // Publish and History (Stage 8)
 app.post('/publish/run-now', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
-  const { jobId, draftId } = req.body as { jobId?: string; draftId?: string };
+  const { draftId } = req.body as { draftId?: string };
   const orgId = req.orgId as string;
-  let targetDraftId = draftId ? String(draftId) : undefined;
+  if (!draftId) return res.status(400).json({ error: 'draftId_required' });
   try {
-    if (getQueueDriver() === 'bullmq') {
-      if (!targetDraftId) return res.status(400).json({ error: 'draftId_required' });
-      const result = await publishDraft(orgId, targetDraftId);
-      if (jobId) await removeBullJob(jobId);
-      return res.json({ ok: true, result });
-    }
-    let processedJobId: string | undefined;
-    if (jobId) {
-      const job = runNow(jobId);
-      if (!job) return res.status(404).json({ error: 'job_not_found' });
-      processedJobId = job.id;
-      if (!targetDraftId) {
-        targetDraftId = String(job.payload?.draftId || '');
-      }
-    }
-    if (!targetDraftId) return res.status(400).json({ error: 'draftId_required' });
-    const result = await publishDraft(orgId, targetDraftId);
-    if (processedJobId) markCompleted(processedJobId);
+    const result = await publishDraft(orgId, String(draftId));
     return res.json({ ok: true, result });
   } catch (err) {
-    if (jobId) markFailed(jobId);
     const message = (err as any)?.message || 'publish_failed';
     return res.status(500).json({ error: message });
   }
 });
 
+
+
+if (getQueueDriver() === 'bullmq') {
+  initBull();
+  const globalAny = global as any;
+  if (!globalAny.__composrPublishWorkerStarted) {
+    startBullWorker(async (payload) => {
+      if (payload?.type === 'publish') {
+        await publishDraft(String(payload.orgId), String(payload.draftId));
+      }
+    });
+    globalAny.__composrPublishWorkerStarted = true;
+  }
+}
 
 app.post('/publish/process-due', requireAuth, csrfProtection, async (req: any, res) => {
   if (getQueueDriver() === 'bullmq') {
