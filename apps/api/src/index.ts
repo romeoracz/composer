@@ -17,7 +17,7 @@ import { createSecretRecord, decryptRecord, hydrateSecretRecord, redact, seriali
 import { activate, createVersion, getActive, listVersions, PromptVersion } from './prompts';
 import { createSeed, deleteSeed, listSeeds, updateSeed } from './seeds';
 import { createDraft, editDraft, listDrafts, listDraftAudits } from './drafts';
-import { cancelJob, runNow, scheduleJob } from './queue';
+import { cancelJob, runNow, scheduleJob, getJobsForOrg, getJobForDraft, rescheduleJob, markCompleted } from './queue';
 import { recordPublish, listHistory } from './history';
 import { getQueueDriver, initBull, addBullJob, startBullWorker, removeBullJob } from './queueDriver';
 import { getDriver } from './repo';
@@ -48,6 +48,25 @@ type SeedFilters = { state?: SeedState; tag?: string; search?: string };
 
 const VALID_SEED_STATES: SeedState[] = ['draft', 'ready'];
 const SUPPORTED_PLATFORMS = ['linkedin', 'x', 'instagram', 'facebook', 'tiktok'];
+const APPROVAL_DEFAULT_DELAY_MS = Number(process.env.APPROVAL_DELAY_MS || 7 * 60 * 1000);
+
+type ApprovalJobStatus = 'pending' | 'cancelled' | 'completed';
+
+type ApprovalJobView = {
+  id: string;
+  draftId: string;
+  jobId: string;
+  runAt: number;
+  status: ApprovalJobStatus;
+  createdAt: number;
+  updatedAt: number;
+};
+
+const memoryApprovalJobs = new Map<string, ApprovalJobView>();
+
+function approvalMemoryKey(orgId: string, draftId: string) {
+  return `${orgId}:${draftId}`;
+}
 
 function normalizePrismaPromptVersion(row: any, sourceVersionId?: string): PromptVersion {
   return {
@@ -149,6 +168,140 @@ function normalizeSeedCreate(body: any) {
   const stateRaw = typeof body?.state === 'string' ? body.state.trim().toLowerCase() : undefined;
   const state: SeedState = VALID_SEED_STATES.includes(stateRaw as SeedState) ? (stateRaw as SeedState) : 'draft';
   return { title, notes, tags, state };
+}
+
+function toApprovalView(row: any): ApprovalJobView {
+  return {
+    id: row.id,
+    draftId: row.draftId,
+    jobId: row.jobId,
+    runAt: row.runAt instanceof Date ? row.runAt.getTime() : row.runAt,
+    status: row.status as ApprovalJobStatus,
+    createdAt: row.createdAt instanceof Date ? row.createdAt.getTime() : row.createdAt,
+    updatedAt: row.updatedAt instanceof Date ? row.updatedAt.getTime() : row.updatedAt,
+  };
+}
+
+async function getApprovalJob(orgId: string, draftId: string): Promise<ApprovalJobView | null> {
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    const row = await prisma.approvalJob.findUnique({ where: { orgId_draftId: { orgId, draftId } } });
+    return row ? toApprovalView(row) : null;
+  }
+  const entry = memoryApprovalJobs.get(approvalMemoryKey(orgId, draftId));
+  return entry ?? null;
+}
+
+async function listApprovalJobs(orgId: string): Promise<ApprovalJobView[]> {
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    const rows = await prisma.approvalJob.findMany({ where: { orgId }, orderBy: { runAt: 'asc' } });
+    return rows.map((row: any) => toApprovalView(row));
+  }
+  const views: ApprovalJobView[] = [];
+  for (const [key, value] of memoryApprovalJobs.entries()) {
+    if (key.startsWith(`${orgId}:`)) views.push(value);
+  }
+  return views.sort((a, b) => a.runAt - b.runAt);
+}
+
+async function upsertApprovalJob(orgId: string, draftId: string, job: { jobId: string; runAt: number; status: ApprovalJobStatus }): Promise<ApprovalJobView> {
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    const row = await prisma.approvalJob.upsert({
+      where: { orgId_draftId: { orgId, draftId } },
+      update: { jobId: job.jobId, runAt: new Date(job.runAt), status: job.status },
+      create: { orgId, draftId, jobId: job.jobId, runAt: new Date(job.runAt), status: job.status },
+    });
+    return toApprovalView(row);
+  }
+  const key = approvalMemoryKey(orgId, draftId);
+  const existing = memoryApprovalJobs.get(key);
+  const now = Date.now();
+  const view: ApprovalJobView = {
+    id: existing?.id ?? job.jobId,
+    draftId,
+    jobId: job.jobId,
+    runAt: job.runAt,
+    status: job.status,
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+  };
+  memoryApprovalJobs.set(key, view);
+  return view;
+}
+
+async function updateApprovalJobStatus(orgId: string, draftId: string, status: ApprovalJobStatus, runAt?: number, jobId?: string): Promise<ApprovalJobView | null> {
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    const row = await prisma.approvalJob.findUnique({ where: { orgId_draftId: { orgId, draftId } } });
+    if (!row) return null;
+    const updated = await prisma.approvalJob.update({
+      where: { id: row.id },
+      data: {
+        status,
+        ...(runAt ? { runAt: new Date(runAt) } : {}),
+        ...(jobId ? { jobId } : {}),
+      },
+    });
+    return toApprovalView(updated);
+  }
+  const key = approvalMemoryKey(orgId, draftId);
+  const existing = memoryApprovalJobs.get(key);
+  if (!existing) return null;
+  const updated: ApprovalJobView = {
+    ...existing,
+    jobId: jobId ?? existing.jobId,
+    runAt: runAt ?? existing.runAt,
+    status,
+    updatedAt: Date.now(),
+  };
+  memoryApprovalJobs.set(key, updated);
+  return updated;
+}
+
+async function scheduleApprovalJob(orgId: string, draftId: string, delayMs: number, payload: any) {
+  const queueDriver = getQueueDriver();
+  if (queueDriver === 'bullmq') {
+    const job = await addBullJob(payload, { delay: delayMs, attempts: 3, backoff: { type: 'exponential', delay: 2000 } });
+    const runAt = Date.now() + delayMs;
+    const jobId = job.id?.toString();
+    if (!jobId) throw new Error('job_id_missing');
+    await upsertApprovalJob(orgId, draftId, { jobId, runAt, status: 'pending' });
+    return { id: jobId, runAt };
+  }
+  const job = scheduleJob(orgId, payload, delayMs);
+  await upsertApprovalJob(orgId, draftId, { jobId: job.id, runAt: job.runAt, status: 'pending' });
+  return { id: job.id, runAt: job.runAt };
+}
+
+async function cancelQueueJobById(jobId: string) {
+  if (getQueueDriver() === 'bullmq') {
+    await removeBullJob(jobId);
+  } else {
+    cancelJob(jobId);
+  }
+}
+
+async function rescheduleApproval(orgId: string, draftId: string, currentJob: ApprovalJobView, payload: any, delayMs: number) {
+  const queueDriver = getQueueDriver();
+  if (queueDriver === 'bullmq') {
+    await removeBullJob(currentJob.jobId);
+    const job = await addBullJob(payload, { delay: delayMs, attempts: 3, backoff: { type: 'exponential', delay: 2000 } });
+    const runAt = Date.now() + delayMs;
+    const jobId = job.id?.toString();
+    if (!jobId) throw new Error('job_id_missing');
+    await upsertApprovalJob(orgId, draftId, { jobId, runAt, status: 'pending' });
+    return { id: jobId, runAt };
+  }
+  const rescheduled = rescheduleJob(currentJob.jobId, delayMs);
+  if (rescheduled) {
+    await upsertApprovalJob(orgId, draftId, { jobId: rescheduled.id, runAt: rescheduled.runAt, status: 'pending' });
+    return { id: rescheduled.id, runAt: rescheduled.runAt };
+  }
+  const job = scheduleJob(orgId, payload, delayMs);
+  await upsertApprovalJob(orgId, draftId, { jobId: job.id, runAt: job.runAt, status: 'pending' });
+  return { id: job.id, runAt: job.runAt };
 }
 
 function normalizeSeedPatch(body: any) {
@@ -547,6 +700,16 @@ function shapeAuditEntry(audit: any) {
   };
 }
 
+async function buildDraftResponse(orgId: string, drafts: any[]) {
+  return Promise.all(
+    drafts.map(async (draft) => {
+      const base = attachDraftMetadata(draft);
+      const approvalJob = await getApprovalJob(orgId, base.id);
+      return { ...base, approvalJob };
+    })
+  );
+}
+
 app.post('/drafts/generate', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
   const { seedId, platforms } = req.body as { seedId: string; platforms?: string[] };
   const orgId = req.orgId as string;
@@ -585,7 +748,8 @@ app.post('/drafts/generate', requireAuth, requireOrg, csrfProtection, async (req
         const existing = await prisma.draft.findUnique({ where: { id: outcome.record.draftId } });
         if (existing) {
           const enriched = attachDraftMetadata(existing);
-          results.push({ platform, status: 'reused', draft: enriched, reused: true });
+          const approvalJob = await getApprovalJob(orgId, enriched.id);
+          results.push({ platform, status: 'reused', draft: { ...enriched, approvalJob }, reused: true });
           continue;
         }
       }
@@ -609,11 +773,12 @@ app.post('/drafts/generate', requireAuth, requireOrg, csrfProtection, async (req
       });
       recordDraftMetadata(outcome.record, draft.id, generatedAt, false);
       const enriched = attachDraftMetadata(draft);
-      results.push({ platform, status: 'generated', draft: enriched });
+      const approvalJob = await getApprovalJob(orgId, enriched.id);
+      results.push({ platform, status: 'generated', draft: { ...enriched, approvalJob } });
     }
 
     const items = await prisma.draft.findMany({ where: { orgId, seedId }, orderBy: { createdAt: 'desc' } });
-    const enrichedDrafts = items.map((draft: any) => attachDraftMetadata(draft));
+    const enrichedDrafts = await buildDraftResponse(orgId, items);
     return res.json({ seedId, results, drafts: enrichedDrafts });
   }
 
@@ -644,7 +809,9 @@ app.post('/drafts/generate', requireAuth, requireOrg, csrfProtection, async (req
     if (outcome.reused && outcome.record.draftId) {
       const existing = listDrafts(orgId, seedId).find((draft) => draft.id === outcome.record.draftId);
       if (existing) {
-        results.push({ platform, status: 'reused', draft: attachDraftMetadata(existing), reused: true });
+        const enriched = attachDraftMetadata(existing);
+        const approvalJob = await getApprovalJob(orgId, enriched.id);
+        results.push({ platform, status: 'reused', draft: { ...enriched, approvalJob }, reused: true });
         continue;
       }
     }
@@ -657,10 +824,12 @@ app.post('/drafts/generate', requireAuth, requireOrg, csrfProtection, async (req
     const generatedAt = Date.now();
     const draft = createDraft(orgId, seedId, platform, outcome.text, { promptVersionId: prompt.id, generatorRunId: outcome.record.runId, generatedAt });
     recordDraftMetadata(outcome.record, draft.id, generatedAt, false);
-    results.push({ platform, status: 'generated', draft: attachDraftMetadata(draft) });
+    const enrichedDraft = attachDraftMetadata(draft);
+    const approvalJob = await getApprovalJob(orgId, enrichedDraft.id);
+    results.push({ platform, status: 'generated', draft: { ...enrichedDraft, approvalJob } });
   }
 
-  const drafts = listDrafts(orgId, seedId).map((draft) => attachDraftMetadata(draft));
+  const drafts = await buildDraftResponse(orgId, listDrafts(orgId, seedId));
   res.json({ seedId, results, drafts });
 });
 
@@ -668,9 +837,10 @@ app.get('/drafts', requireAuth, requireOrg, async (req: any, res) => {
   if (getDriver() === 'prisma') {
     const prisma = getPrisma();
     const items = await prisma.draft.findMany({ where: { orgId: req.orgId, ...(req.query.seedId ? { seedId: String(req.query.seedId) } : {}) }, orderBy: { createdAt: 'desc' } });
-    return res.json({ items: items.map((draft: any) => attachDraftMetadata(draft)) });
+    const drafts = await buildDraftResponse(req.orgId, items);
+    return res.json({ items: drafts });
   }
-  const items = listDrafts(req.orgId, req.query.seedId as string | undefined).map((draft) => attachDraftMetadata(draft));
+  const items = await buildDraftResponse(req.orgId, listDrafts(req.orgId, req.query.seedId as string | undefined));
   res.json({ items });
 });
 
@@ -682,12 +852,14 @@ app.get('/drafts/:id', requireAuth, requireOrg, async (req: any, res) => {
     const draft = await prisma.draft.findUnique({ where: { id: draftId } });
     if (!draft || draft.orgId !== orgId) return res.status(404).json({ error: 'not_found' });
     const audits = await prisma.draftAudit.findMany({ where: { draftId }, orderBy: { createdAt: 'desc' } });
-    return res.json({ draft: attachDraftMetadata(draft), audits: audits.map((audit: any) => shapeAuditEntry(audit)) });
+    const approvalJob = await getApprovalJob(orgId, draftId);
+    return res.json({ draft: { ...attachDraftMetadata(draft), approvalJob }, audits: audits.map((audit: any) => shapeAuditEntry(audit)) });
   }
   const draft = listDrafts(orgId).find((d) => d.id === draftId);
   if (!draft) return res.status(404).json({ error: 'not_found' });
   const audits = listDraftAudits(orgId, draftId).map((audit) => shapeAuditEntry(audit));
-  res.json({ draft: attachDraftMetadata(draft), audits });
+  const approvalJob = await getApprovalJob(orgId, draftId);
+  res.json({ draft: { ...attachDraftMetadata(draft), approvalJob }, audits });
 });
 
 app.post('/drafts/:id/edit', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
@@ -699,13 +871,23 @@ app.post('/drafts/:id/edit', requireAuth, requireOrg, csrfProtection, async (req
     if (!existing || existing.orgId !== req.orgId) return res.status(404).json({ error: 'not_found' });
     const draft = await prisma.draft.update({ where: { id: existing.id }, data: { editedText: text } });
     await prisma.draftAudit.create({ data: { orgId: req.orgId, draftId: draft.id, editor, editedText: text } });
+    const approvalJob = await getApprovalJob(req.orgId, draft.id);
+    if (approvalJob && approvalJob.status === 'pending') {
+      await rescheduleApproval(req.orgId, draft.id, approvalJob, { type: 'publish', orgId: req.orgId, draftId: draft.id }, APPROVAL_DEFAULT_DELAY_MS);
+    }
     const audits = await prisma.draftAudit.findMany({ where: { draftId: draft.id }, orderBy: { createdAt: 'desc' } });
-    return res.json({ draft: attachDraftMetadata(draft), audits: audits.map((audit: any) => shapeAuditEntry(audit)) });
+    const updatedApproval = await getApprovalJob(req.orgId, draft.id);
+    return res.json({ draft: { ...attachDraftMetadata(draft), approvalJob: updatedApproval }, audits: audits.map((audit: any) => shapeAuditEntry(audit)) });
   }
   const d = editDraft(req.orgId, req.params.id, text, editor);
   if (!d) return res.status(404).json({ error: 'not_found' });
+  const approvalJob = await getApprovalJob(req.orgId, req.params.id);
+  if (approvalJob && approvalJob.status === 'pending') {
+    await rescheduleApproval(req.orgId, req.params.id, approvalJob, { type: 'publish', orgId: req.orgId, draftId: req.params.id }, APPROVAL_DEFAULT_DELAY_MS);
+  }
   const audits = listDraftAudits(req.orgId, req.params.id).map((audit) => shapeAuditEntry(audit));
-  res.json({ draft: attachDraftMetadata(d), audits });
+  const updatedApproval = await getApprovalJob(req.orgId, req.params.id);
+  res.json({ draft: { ...attachDraftMetadata(d), approvalJob: updatedApproval }, audits });
 });
 
 app.post('/preview/validate', requireAuth, requireOrg, (req: any, res) => {
@@ -720,24 +902,46 @@ app.post('/preview/validate', requireAuth, requireOrg, (req: any, res) => {
 app.post('/approve', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
   const { draftId, delayMs } = req.body as { draftId: string; delayMs?: number };
   const orgId = req.orgId as string;
-  const draft = listDrafts(orgId).find((d) => d.id === draftId);
-  if (!draft) return res.status(404).json({ error: 'draft_not_found' });
-  if (getQueueDriver() === 'bullmq') {
-    const ms = delayMs ?? 7 * 60 * 1000;
-    const job = await addBullJob({ type: 'publish', orgId, draftId }, { delay: ms, attempts: 3, backoff: { type: 'exponential', delay: 2000 } });
-    return res.json({ job: { id: job.id } });
+  const delay = typeof delayMs === 'number' ? delayMs : APPROVAL_DEFAULT_DELAY_MS;
+  let draft: any;
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    draft = await prisma.draft.findUnique({ where: { id: draftId } });
+    if (!draft || draft.orgId !== orgId) return res.status(404).json({ error: 'draft_not_found' });
+  } else {
+    draft = listDrafts(orgId).find((d) => d.id === draftId);
+    if (!draft) return res.status(404).json({ error: 'draft_not_found' });
   }
-  const job = scheduleJob(orgId, { type: 'publish', draftId }, delayMs ?? 7 * 60 * 1000);
-  res.json({ job });
+
+  const existing = await getApprovalJob(orgId, draftId);
+  if (existing && existing.status === 'pending') {
+    await cancelQueueJobById(existing.jobId);
+    await updateApprovalJobStatus(orgId, draftId, 'cancelled');
+  }
+
+  const payload = { type: 'publish', orgId, draftId };
+  const scheduled = await scheduleApprovalJob(orgId, draftId, delay, payload);
+  res.json({ job: scheduled });
+});
+
+app.get('/approve/jobs', requireAuth, requireOrg, async (req: any, res) => {
+  const jobs = await listApprovalJobs(req.orgId);
+  res.json({ jobs });
 });
 
 app.post('/approve/cancel', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
-  const { jobId } = req.body as { jobId: string };
-  if (getQueueDriver() === 'bullmq') {
-    const ok = await removeBullJob(jobId);
-    return res.json({ ok });
+  const { jobId, draftId } = req.body as { jobId: string; draftId?: string };
+  if (!jobId) return res.status(400).json({ error: 'jobId_required' });
+  const orgId = req.orgId as string;
+  let approval = draftId ? await getApprovalJob(orgId, draftId) : null;
+  if (!approval) {
+    const jobs = await listApprovalJobs(orgId);
+    approval = jobs.find((job) => job.jobId === jobId) || null;
   }
-  res.json({ ok: cancelJob(jobId) });
+  if (!approval) return res.json({ ok: false });
+  await cancelQueueJobById(approval.jobId);
+  await updateApprovalJobStatus(orgId, approval.draftId, 'cancelled');
+  res.json({ ok: true });
 });
 
 // Publish and History (Stage 8)
@@ -751,6 +955,7 @@ app.post('/publish/run-now', requireAuth, requireOrg, csrfProtection, async (req
       const draft = await prisma.draft.findUnique({ where: { id: draftId } });
       if (!draft || draft.orgId !== orgId) return res.status(404).json({ error: 'draft_not_found' });
       const published = await prisma.history.create({ data: { orgId, seedId: draft.seedId, draftId: draft.id, platform: draft.platform, postId: 'post_' + draft.id, originalText: draft.originalText, editedText: draft.editedText || null } });
+      await updateApprovalJobStatus(orgId, draft.id, 'completed');
       return res.json({ published });
     }
     const draft = listDrafts(orgId).find((d) => d.id === draftId);
@@ -764,6 +969,7 @@ app.post('/publish/run-now', requireAuth, requireOrg, csrfProtection, async (req
       originalText: draft.originalText,
       editedText: draft.editedText,
     });
+    await updateApprovalJobStatus(orgId, draftId, 'completed');
     return res.json({ published: hist });
   }
   const job = runNow(jobId);
@@ -774,6 +980,8 @@ app.post('/publish/run-now', requireAuth, requireOrg, csrfProtection, async (req
     const draft = await prisma.draft.findUnique({ where: { id: String(job.payload?.draftId) } });
     if (!draft || draft.orgId !== orgId) return res.status(404).json({ error: 'draft_not_found' });
     const published = await prisma.history.create({ data: { orgId, seedId: draft.seedId, draftId: draft.id, platform: draft.platform, postId: 'post_' + draft.id, originalText: draft.originalText, editedText: draft.editedText || null } });
+    markCompleted(jobId);
+    await updateApprovalJobStatus(orgId, draft.id, 'completed');
     return res.json({ published });
   }
   const draft = listDrafts(orgId).find((d) => d.id === job.payload?.draftId);
@@ -787,6 +995,8 @@ app.post('/publish/run-now', requireAuth, requireOrg, csrfProtection, async (req
     originalText: draft.originalText,
     editedText: draft.editedText,
   });
+  markCompleted(jobId);
+  await updateApprovalJobStatus(orgId, draft.id, 'completed');
   res.json({ published: hist });
 });
 

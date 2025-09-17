@@ -22,6 +22,7 @@ model Org {
   drafts       Draft[]
   histories    History[]
   draftAudits  DraftAudit[]
+  approvalJobs ApprovalJob[]
   metrics      Metric[]
   schedules    Schedule[]
   integrations Integration[]
@@ -90,6 +91,7 @@ model Draft {
   generatedAt     DateTime?
   histories       History[]
   audits          DraftAudit[]
+  approvalJobs    ApprovalJob[]
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @updatedAt
 }
@@ -105,6 +107,22 @@ model DraftAudit {
   createdAt  DateTime @default(now())
 
   @@index([orgId, draftId], name: "draft_audit_org_draft")
+}
+
+model ApprovalJob {
+  id        String   @id @default(cuid())
+  org       Org      @relation(fields: [orgId], references: [id])
+  orgId     String
+  draft     Draft    @relation(fields: [draftId], references: [id])
+  draftId   String
+  jobId     String
+  runAt     DateTime
+  status    String   @default("pending")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([orgId, draftId], name: "approval_job_org_draft_unique")
+  @@index([orgId, draftId], name: "approval_job_org_draft")
 }
 
 model History {

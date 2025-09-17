@@ -31,6 +31,11 @@ type Draft = {
     generatedAt: number;
     reused: boolean;
   } | null;
+  approvalJob?: {
+    jobId: string;
+    runAt: number;
+    status: "pending" | "cancelled" | "completed";
+  } | null;
 };
 
 type DraftAudit = {
@@ -111,6 +116,7 @@ export default function ReviewPage() {
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
   const [validating, setValidating] = useState(false);
   const [savingDraft, setSavingDraft] = useState(false);
+  const [undoBusy, setUndoBusy] = useState(false);
 
   const availableTags = useMemo(() => {
     const set = new Set<string>();
@@ -467,6 +473,30 @@ export default function ReviewPage() {
     return providers.find((provider) => provider.key === platform)?.constraints;
   }
 
+  async function cancelApproval() {
+    if (!draftDetails?.approvalJob || draftDetails.approvalJob.status !== "pending") return;
+    setUndoBusy(true);
+    setMessage(null);
+    try {
+      const token = await ensureCsrf();
+      const response = await fetch(`/api/approve/cancel`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "CSRF-Token": token },
+        credentials: "include",
+        body: JSON.stringify({ jobId: draftDetails.approvalJob.jobId, draftId: draftDetails.id }),
+      });
+      if (!response.ok) throw new Error("undo_failed");
+      setMessage("Approval cancelled");
+      await loadDraftDetails(draftDetails.id);
+      if (selectedSeedId) await loadDrafts(selectedSeedId);
+    } catch (err) {
+      console.error(err);
+      setMessage("Unable to cancel approval");
+    } finally {
+      setUndoBusy(false);
+    }
+  }
+
   async function generateDrafts(seedId: string) {
     setGenerating(true);
     setMessage(null);
@@ -808,6 +838,37 @@ export default function ReviewPage() {
                               {validating && " · validating…"}
                             </div>
                           </header>
+                          {draftDetails.approvalJob && (
+                            <div
+                              style={{
+                                display: "flex",
+                                justifyContent: "space-between",
+                                alignItems: "center",
+                                background: "#eef7f4",
+                                padding: "8px 12px",
+                                borderRadius: 8,
+                                fontSize: 12,
+                                color: draftDetails.approvalJob.status === "pending" ? "#0a8" : "#777",
+                              }}
+                            >
+                              <span>
+                                Approval status: {draftDetails.approvalJob.status}
+                                {draftDetails.approvalJob.status === "pending" && ` • ${formatCountdown(draftDetails.approvalJob.runAt)}`}
+                              </span>
+                              {draftDetails.approvalJob.status === "pending" && (
+                                <button
+                                  style={{ ...buttonSecondary, fontSize: 12, padding: "4px 10px" }}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    cancelApproval();
+                                  }}
+                                  disabled={undoBusy}
+                                >
+                                  {undoBusy ? "Cancelling…" : "Undo"}
+                                </button>
+                              )}
+                            </div>
+                          )}
                           <div style={{ display: "grid", gap: 12 }}>
                             <div>
                               <h4 style={{ margin: "0 0 4px", fontSize: 13, color: "#555" }}>Original</h4>
@@ -964,4 +1025,13 @@ function formatTimestamp(value: number) {
   } catch {
     return "Unknown";
   }
+}
+
+function formatCountdown(runAt: number) {
+  const diff = runAt - Date.now();
+  if (diff <= 0) return "due now";
+  const minutes = Math.floor(diff / 60000);
+  const seconds = Math.floor((diff % 60000) / 1000);
+  if (minutes <= 0) return `${seconds}s`;
+  return `${minutes}m ${seconds}s`;
 }
