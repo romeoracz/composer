@@ -14,7 +14,8 @@
 - Visit http://localhost:3000
 
 ## Environment
-- See apps/api/.env.sample for variables
+- API expects a base64-encoded 32 byte key in `SECRET_ENC_KEY` (use `openssl rand -base64 32` during setup)
+- Optional: `ENABLE_TEST_ENDPOINTS=true` enables sandbox connection tests
 - Drivers:
   - DB_DRIVER: memory|prisma
   - QUEUE_DRIVER: memory|bullmq

@@ -13,7 +13,7 @@ import { generateCSV, generatePDF } from './exports';
 import { createOrgForUser, getActiveOrgId, listMembershipsForUser, setActiveOrg, isUserMemberOfOrg, addMember, getRole } from './tenancy';
 import { addComment, approveSuggestion, canApprove, canComment, canSuggest, createSuggestion, listActivity, listComments, listSuggestions } from './collab';
 import { list as listSchedules, reschedule as reschedulePost, schedule as schedulePost } from './scheduling';
-import { getCredentials, redact, setCredentials, status as integrationStatus, testConnection } from './integrations';
+import { createSecretRecord, decryptRecord, hydrateSecretRecord, redact, serializeSecretRecord, setCredentials, status as integrationStatus, testConnection, testRecord, type ProviderKey } from './integrations';
 import { activate, createVersion, getActive, listVersions } from './prompts';
 import { createSeed, deleteSeed, listSeeds, updateSeed } from './seeds';
 import { createDraft, editDraft, listDrafts } from './drafts';
@@ -159,9 +159,26 @@ app.get('/integrations/status', requireAuth, requireOrg, async (req: any, res) =
     const prisma = getPrisma();
     const rows = await prisma.integration.findMany({ where: { orgId: req.orgId } });
     type IntegrationRow = (typeof rows)[number];
-    const providers = ['linkedin', 'x', 'instagram', 'facebook', 'tiktok'].map((k) => {
-      const row = rows.find((integration: IntegrationRow) => integration.provider === k);
-      return { key: k, hasCreds: !!row, creds: row ? { clientId: '***', clientSecret: '***' } : undefined };
+    const providerKeys: ProviderKey[] = ['linkedin', 'x', 'instagram', 'facebook', 'tiktok'];
+    const providers = providerKeys.map((providerKey) => {
+      const row = rows.find((integration: IntegrationRow) => integration.provider === providerKey);
+      if (!row) {
+        return { key: providerKey, hasCreds: false, creds: undefined, lastUpdatedAt: undefined, lastVerifiedAt: undefined, lastStatus: undefined, lastError: undefined };
+      }
+      const record = hydrateSecretRecord(row.data);
+      if (!record) {
+        return { key: providerKey, hasCreds: false, creds: undefined };
+      }
+      const creds = redact(decryptRecord(record));
+      return {
+        key: providerKey,
+        hasCreds: true,
+        creds,
+        lastUpdatedAt: record.lastUpdatedAt,
+        lastVerifiedAt: record.lastVerifiedAt,
+        lastStatus: record.lastStatus,
+        lastError: record.lastError,
+      };
     });
     return res.json({ providers });
   }
@@ -169,21 +186,32 @@ app.get('/integrations/status', requireAuth, requireOrg, async (req: any, res) =
 });
 
 app.post('/integrations/creds/:key', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
-  const key = req.params.key as any;
+  const key = req.params.key as ProviderKey;
+  const credsInput = (req.body || {}) as { clientId?: string; clientSecret?: string; accessToken?: string; refreshToken?: string };
   if (getDriver() === 'prisma') {
     const prisma = getPrisma();
-    const data = encryptJson(req.body || {});
-    await prisma.integration.upsert({ where: { orgId_provider: { orgId: req.orgId, provider: key } }, update: { data }, create: { orgId: req.orgId, provider: key, data } });
-    return res.json({ ok: true, creds: { clientId: '***', clientSecret: '***' } });
+    const record = createSecretRecord(credsInput);
+    await prisma.integration.upsert({ where: { orgId_provider: { orgId: req.orgId, provider: key } }, update: { data: serializeSecretRecord(record) }, create: { orgId: req.orgId, provider: key, data: serializeSecretRecord(record) } });
+    return res.json({ ok: true, provider: key, creds: redact(decryptRecord(record)), meta: { lastUpdatedAt: record.lastUpdatedAt } });
   }
-  setCredentials(req.orgId, key, req.body || {});
-  res.json({ ok: true, creds: redact(getCredentials(req.orgId, key)) });
+  const record = setCredentials(req.orgId, key, credsInput);
+  res.json({ ok: true, provider: key, creds: redact(credsInput), meta: { lastUpdatedAt: record.lastUpdatedAt } });
 });
 
 app.post('/integrations/test/:key', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
   if (!isTestEndpointsEnabled()) return res.status(404).json({ error: 'not_found' });
-  const key = req.params.key as any;
-  const result = await testConnection(req.orgId, key);
+  const key = req.params.key as ProviderKey;
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    const row = await prisma.integration.findUnique({ where: { orgId_provider: { orgId: req.orgId, provider: key } } });
+    if (!row) return res.json({ ok: false, details: 'credentials_missing' });
+    const record = hydrateSecretRecord(row.data);
+    if (!record) return res.json({ ok: false, details: 'credentials_invalid' });
+    const result = testRecord(record, key);
+    await prisma.integration.update({ where: { id: row.id }, data: { data: serializeSecretRecord(result.record) } });
+    return res.json({ ok: result.ok, details: result.details });
+  }
+  const result = testConnection(req.orgId, key);
   res.json(result);
 });
 
