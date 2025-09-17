@@ -5,6 +5,7 @@ export type PromptVersion = {
   author: string;
   notes?: string;
   createdAt: number;
+  sourceVersionId?: string;
 };
 
 type OrgPrompts = {
@@ -19,7 +20,8 @@ function genId(prefix: string) {
 }
 
 export function listVersions(orgId: string): PromptVersion[] {
-  return (promptsByOrg[orgId] ||= { versions: [] }).versions.slice().sort((a, b) => b.createdAt - a.createdAt);
+  const org = (promptsByOrg[orgId] ||= { versions: [] });
+  return org.versions.slice().sort((a, b) => b.createdAt - a.createdAt);
 }
 
 export function getActive(orgId: string): PromptVersion | undefined {
@@ -28,17 +30,23 @@ export function getActive(orgId: string): PromptVersion | undefined {
   return org.versions.find((v) => v.id === org.activeId);
 }
 
-export function createVersion(orgId: string, author: string, content: string, notes?: string): PromptVersion {
+export function createVersion(orgId: string, author: string, content: string, notes?: string, sourceVersionId?: string): PromptVersion {
   const org = (promptsByOrg[orgId] ||= { versions: [] });
-  const v: PromptVersion = { id: genId('prm'), orgId, content, author, notes, createdAt: Date.now() };
+  const v: PromptVersion = { id: genId('prm'), orgId, content, author, notes, createdAt: Date.now(), sourceVersionId };
   org.versions.push(v);
   org.activeId = v.id;
   return v;
 }
 
-export function activate(orgId: string, id: string): PromptVersion | undefined {
+export function activate(orgId: string, id: string, author: string, notes?: string): PromptVersion | undefined {
   const org = (promptsByOrg[orgId] ||= { versions: [] });
   const found = org.versions.find((v) => v.id === id);
-  if (found) org.activeId = id;
-  return found;
+  if (!found) return undefined;
+  const entryNotes = notes ?? `Reinstated from version ${found.id}`;
+  return createVersion(orgId, author, found.content, entryNotes, found.id);
+}
+
+export function getVersion(orgId: string, id: string): PromptVersion | undefined {
+  const org = (promptsByOrg[orgId] ||= { versions: [] });
+  return org.versions.find((v) => v.id === id);
 }

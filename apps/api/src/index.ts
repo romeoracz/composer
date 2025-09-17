@@ -14,7 +14,7 @@ import { createOrgForUser, getActiveOrgId, listMembershipsForUser, setActiveOrg,
 import { addComment, approveSuggestion, canApprove, canComment, canSuggest, createSuggestion, listActivity, listComments, listSuggestions } from './collab';
 import { list as listSchedules, reschedule as reschedulePost, schedule as schedulePost } from './scheduling';
 import { createSecretRecord, decryptRecord, hydrateSecretRecord, redact, serializeSecretRecord, setCredentials, status as integrationStatus, testConnection, testRecord, type ProviderKey } from './integrations';
-import { activate, createVersion, getActive, listVersions } from './prompts';
+import { activate, createVersion, getActive, listVersions, PromptVersion } from './prompts';
 import { createSeed, deleteSeed, listSeeds, updateSeed } from './seeds';
 import { createDraft, editDraft, listDrafts } from './drafts';
 import { cancelJob, runNow, scheduleJob } from './queue';
@@ -25,9 +25,64 @@ import { getPrisma } from './prismaClient';
 import { encryptJson } from './crypto';
 import { withRequestId } from './logging';
 import { oauthStart, oauthCallback } from './oauth';
+import { diffLines, type DiffSegment } from './diff';
 
 function isTestEndpointsEnabled() {
   return (process.env.ENABLE_TEST_ENDPOINTS || 'false').toLowerCase() === 'true';
+}
+
+type PromptVersionView = {
+  id: string;
+  orgId: string;
+  author: string;
+  notes?: string;
+  content: string;
+  createdAt: number;
+  sourceVersionId?: string;
+  isActive: boolean;
+  diff?: DiffSegment[];
+};
+
+function normalizePrismaPromptVersion(row: any, sourceVersionId?: string): PromptVersion {
+  return {
+    id: row.id,
+    orgId: row.orgId,
+    author: row.author,
+    notes: row.notes ?? undefined,
+    content: row.content,
+    createdAt: row.createdAt instanceof Date ? row.createdAt.getTime() : new Date(row.createdAt).getTime(),
+    sourceVersionId,
+  };
+}
+
+function toPromptView(version: PromptVersion, activeId: string, activeContent: string): PromptVersionView {
+  const isActive = version.id === activeId;
+  const diffSegments = isActive ? undefined : diffLines(version.content, activeContent);
+  const hasMeaningfulDiff = diffSegments?.some((segment) => segment.type !== 'context');
+  return {
+    id: version.id,
+    orgId: version.orgId,
+    author: version.author,
+    notes: version.notes,
+    content: version.content,
+    createdAt: version.createdAt,
+    sourceVersionId: version.sourceVersionId,
+    isActive,
+    diff: hasMeaningfulDiff ? diffSegments : undefined,
+  };
+}
+
+function buildPromptResponsePayload(versions: PromptVersion[], activeVersion?: PromptVersion | null) {
+  if (!versions.length) {
+    return { active: null, versions: [] as PromptVersionView[] };
+  }
+  const sorted = versions.slice().sort((a, b) => b.createdAt - a.createdAt);
+  const active = activeVersion ?? sorted[0];
+  const activeId = active.id;
+  const activeContent = active.content;
+  const views = sorted.map((version) => toPromptView(version, activeId, activeContent));
+  const activeView = views.find((v) => v.id === activeId) ?? null;
+  return { active: activeView, versions: views };
 }
 
 const app = express();
@@ -219,37 +274,53 @@ app.post('/integrations/test/:key', requireAuth, requireOrg, csrfProtection, asy
 app.get('/prompts', requireAuth, requireOrg, async (req: any, res) => {
   if (getDriver() === 'prisma') {
     const prisma = getPrisma();
-    const versions = await prisma.promptVersion.findMany({ where: { orgId: req.orgId }, orderBy: { createdAt: 'desc' } });
-    const active = versions[0] || null; // latest as active placeholder
-    return res.json({ versions, active });
+    const rows = await prisma.promptVersion.findMany({ where: { orgId: req.orgId }, orderBy: { createdAt: 'desc' } });
+    const mapped = rows.map((row: any) => normalizePrismaPromptVersion(row));
+    return res.json(buildPromptResponsePayload(mapped, mapped[0] ?? null));
   }
-  res.json({ versions: listVersions(req.orgId), active: getActive(req.orgId) });
+  const versions = listVersions(req.orgId);
+  const active = getActive(req.orgId) ?? versions[0] ?? null;
+  res.json(buildPromptResponsePayload(versions, active));
 });
 
 app.post('/prompts', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
-  const content = String(req.body?.content || '');
-  const notes = req.body?.notes as string | undefined;
+  const content = String(req.body?.content || '').trim();
+  const notesRaw = req.body?.notes as string | undefined;
+  const notes = notesRaw ? notesRaw.trim() : undefined;
+  if (!content) return res.status(400).json({ error: 'content_required' });
   if (getDriver() === 'prisma') {
     const prisma = getPrisma();
-    const version = await prisma.promptVersion.create({ data: { orgId: req.orgId, content, notes, author: req.session.user.email } });
-    return res.json({ version });
+    await prisma.promptVersion.create({ data: { orgId: req.orgId, content, notes, author: req.session.user.email } });
+    const rows = await prisma.promptVersion.findMany({ where: { orgId: req.orgId }, orderBy: { createdAt: 'desc' } });
+    const mapped = rows.map((row: any) => normalizePrismaPromptVersion(row));
+    return res.json(buildPromptResponsePayload(mapped, mapped[0] ?? null));
   }
-  const v = createVersion(req.orgId, req.session.user.email, content, notes);
-  res.json({ version: v });
+  createVersion(req.orgId, req.session.user.email, content, notes);
+  const versions = listVersions(req.orgId);
+  const active = getActive(req.orgId) ?? versions[0] ?? null;
+  res.json(buildPromptResponsePayload(versions, active));
 });
 
 app.post('/prompts/activate', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
   const id = String(req.body?.id || '');
   if (getDriver() === 'prisma') {
     const prisma = getPrisma();
-    // No explicit active pointer in schema; return version for now
     const version = await prisma.promptVersion.findUnique({ where: { id } });
     if (!version || version.orgId !== req.orgId) return res.status(404).json({ error: 'not_found' });
-    return res.json({ version });
+    const activationNotesRaw = req.body?.notes as string | undefined;
+    const activationNotes = activationNotesRaw ? activationNotesRaw.trim() : undefined;
+    await prisma.promptVersion.create({ data: { orgId: req.orgId, content: version.content, notes: activationNotes ?? `Reinstated from version ${version.id}`, author: req.session.user.email } });
+    const rows = await prisma.promptVersion.findMany({ where: { orgId: req.orgId }, orderBy: { createdAt: 'desc' } });
+    const mapped = rows.map((row: any) => normalizePrismaPromptVersion(row));
+    return res.json(buildPromptResponsePayload(mapped, mapped[0] ?? null));
   }
-  const v = activate(req.orgId, id);
+  const notesRaw = req.body?.notes as string | undefined;
+  const cleanedNotes = notesRaw ? notesRaw.trim() : undefined;
+  const v = activate(req.orgId, id, req.session.user.email, cleanedNotes);
   if (!v) return res.status(404).json({ error: 'not_found' });
-  res.json({ version: v });
+  const versions = listVersions(req.orgId);
+  const active = getActive(req.orgId) ?? versions[0] ?? null;
+  res.json(buildPromptResponsePayload(versions, active));
 });
 
 // Seeds (Stage 4)
