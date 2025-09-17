@@ -7,6 +7,9 @@ export type Draft = {
   editedText?: string;
   createdAt: number;
   updatedAt: number;
+  promptVersionId?: string | null;
+  generatorRunId?: string;
+  generatedAt?: number;
 };
 
 const draftsByOrg: Record<string, Draft[]> = {};
@@ -23,7 +26,13 @@ export function listDrafts(orgId: string, seedId?: string): Draft[] {
     .sort((a, b) => b.createdAt - a.createdAt);
 }
 
-export function createDraft(orgId: string, seedId: string, platform: string, text: string): Draft {
+export function createDraft(
+  orgId: string,
+  seedId: string,
+  platform: string,
+  text: string,
+  metadata?: { promptVersionId?: string | null; generatorRunId?: string; generatedAt?: number }
+): Draft {
   const d: Draft = {
     id: genId('drf'),
     orgId,
@@ -32,6 +41,9 @@ export function createDraft(orgId: string, seedId: string, platform: string, tex
     originalText: text,
     createdAt: Date.now(),
     updatedAt: Date.now(),
+    promptVersionId: metadata?.promptVersionId ?? null,
+    generatorRunId: metadata?.generatorRunId,
+    generatedAt: metadata?.generatedAt ?? Date.now(),
   };
   (draftsByOrg[orgId] ||= []).push(d);
   return d;

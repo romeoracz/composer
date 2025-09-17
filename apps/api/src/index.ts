@@ -26,6 +26,7 @@ import { encryptJson } from './crypto';
 import { withRequestId } from './logging';
 import { oauthStart, oauthCallback } from './oauth';
 import { diffLines, type DiffSegment } from './diff';
+import { ensureGeneration, recordDraftMetadata, getDraftMetadata, type SeedState } from './generator';
 
 function isTestEndpointsEnabled() {
   return (process.env.ENABLE_TEST_ENDPOINTS || 'false').toLowerCase() === 'true';
@@ -43,10 +44,10 @@ type PromptVersionView = {
   diff?: DiffSegment[];
 };
 
-type SeedState = 'draft' | 'ready';
 type SeedFilters = { state?: SeedState; tag?: string; search?: string };
 
 const VALID_SEED_STATES: SeedState[] = ['draft', 'ready'];
+const SUPPORTED_PLATFORMS = ['linkedin', 'x', 'instagram', 'facebook', 'tiktok'];
 
 function normalizePrismaPromptVersion(row: any, sourceVersionId?: string): PromptVersion {
   return {
@@ -506,40 +507,152 @@ app.delete('/seeds/:id', requireAuth, requireOrg, csrfProtection, async (req: an
 });
 
 // Drafts/Generation and Preview (Stage 5 & 6)
-function generateTextFromSeed(seedTitle: string, prompt?: string, platform?: string) {
-  const base = prompt ? `[${platform}] ${prompt}: ${seedTitle}` : `[${platform}] ${seedTitle}`;
-  return base.slice(0, 1000);
+function generateTextFromSeed(seedTitle: string, seedNotes?: string | null, prompt?: string, platform?: string) {
+  const header = `[${(platform || 'GEN').toUpperCase()}] ${seedTitle}`;
+  const promptLine = prompt ? `${prompt.trim()}` : 'Generate a compelling social post';
+  const notesSection = seedNotes && seedNotes.trim().length ? `Key Points:\n- ${seedNotes.trim()}` : '';
+  const body = `${promptLine}\n\n${notesSection}`.trim();
+  return [header, body].filter(Boolean).join('\n\n').slice(0, 1200);
+}
+
+function delayForGeneration(platform: string) {
+  const base = 80;
+  const jitter = (platform.length % 3) * 40;
+  return new Promise((resolve) => setTimeout(resolve, base + jitter));
+}
+
+function attachDraftMetadata(draft: any) {
+  const meta = getDraftMetadata(draft.id);
+  return {
+    ...draft,
+    createdAt: draft.createdAt instanceof Date ? draft.createdAt.getTime() : draft.createdAt,
+    updatedAt: draft.updatedAt instanceof Date ? draft.updatedAt.getTime() : draft.updatedAt,
+    generatorMeta: meta ?? null,
+  };
 }
 
 app.post('/drafts/generate', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
-  const { seedId, platforms } = req.body as { seedId: string; platforms: string[] };
+  const { seedId, platforms } = req.body as { seedId: string; platforms?: string[] };
+  const orgId = req.orgId as string;
+  if (!seedId) return res.status(400).json({ error: 'seed_required' });
+
+  const requestedPlatforms = Array.from(new Set((platforms && Array.isArray(platforms) ? platforms : ['linkedin', 'x']).filter((platform) => SUPPORTED_PLATFORMS.includes(platform))));
+  if (!requestedPlatforms.length) return res.status(400).json({ error: 'platforms_invalid', supported: SUPPORTED_PLATFORMS });
+
   if (getDriver() === 'prisma') {
     const prisma = getPrisma();
     const seed = await prisma.seed.findUnique({ where: { id: seedId } });
-    if (!seed || seed.orgId !== req.orgId) return res.status(404).json({ error: 'seed_not_found' });
-    const latestPrompt = await prisma.promptVersion.findFirst({ where: { orgId: req.orgId }, orderBy: { createdAt: 'desc' } });
-    const drafts = [] as any[];
-    for (const p of platforms || []) {
-      const text = generateTextFromSeed(seed.title, latestPrompt?.content, p);
-      const d = await prisma.draft.create({ data: { orgId: req.orgId, seedId, platform: p, originalText: text } });
-      drafts.push(d);
+    if (!seed || seed.orgId !== orgId) return res.status(404).json({ error: 'seed_not_found' });
+    const latestPrompt = await prisma.promptVersion.findFirst({ where: { orgId }, orderBy: { createdAt: 'desc' } });
+    if (!latestPrompt) return res.status(400).json({ error: 'prompt_not_configured' });
+
+    const results: Array<{ platform: string; status: string; draft?: any; error?: string; reused?: boolean }> = [];
+
+    for (const platform of requestedPlatforms) {
+      const outcome = await ensureGeneration(
+        {
+          orgId,
+          seedId,
+          platform,
+          promptVersionId: latestPrompt.id,
+          promptContent: latestPrompt.content,
+          seedTitle: seed.title,
+          seedNotes: seed.notes ?? null,
+        },
+        async () => {
+          await delayForGeneration(platform);
+          return generateTextFromSeed(seed.title, seed.notes, latestPrompt.content, platform);
+        }
+      );
+
+      if (outcome.reused && outcome.record.draftId) {
+        const existing = await prisma.draft.findUnique({ where: { id: outcome.record.draftId } });
+        if (existing) {
+          const enriched = attachDraftMetadata(existing);
+          results.push({ platform, status: 'reused', draft: enriched, reused: true });
+          continue;
+        }
+      }
+
+      if (outcome.record.status !== 'completed' || !outcome.text) {
+        results.push({ platform, status: 'failed', error: outcome.record.error || 'generation_failed' });
+        continue;
+      }
+
+      const generatedAt = Date.now();
+      const draft = await prisma.draft.create({
+        data: {
+          orgId,
+          seedId,
+          platform,
+          originalText: outcome.text,
+        },
+      });
+      recordDraftMetadata(outcome.record, draft.id, generatedAt, false);
+      const enriched = attachDraftMetadata(draft);
+      results.push({ platform, status: 'generated', draft: enriched });
     }
-    return res.json({ drafts });
+
+    const items = await prisma.draft.findMany({ where: { orgId, seedId }, orderBy: { createdAt: 'desc' } });
+    const enrichedDrafts = items.map((draft: any) => attachDraftMetadata(draft));
+    return res.json({ seedId, results, drafts: enrichedDrafts });
   }
-  const seed = listSeeds(req.orgId).find((s) => s.id === seedId);
-  const prompt = getActive(req.orgId)?.content;
+
+  const seed = listSeeds(orgId).find((s) => s.id === seedId);
+  const prompt = getActive(orgId);
   if (!seed) return res.status(404).json({ error: 'seed_not_found' });
-  const drafts = (platforms || []).map((p) => createDraft(req.orgId, seedId, p, generateTextFromSeed(seed.title, prompt, p)));
-  res.json({ drafts });
+  if (!prompt) return res.status(400).json({ error: 'prompt_not_configured' });
+
+  const results: Array<{ platform: string; status: string; draft?: any; error?: string; reused?: boolean }> = [];
+
+  for (const platform of requestedPlatforms) {
+    const outcome = await ensureGeneration(
+      {
+        orgId,
+        seedId,
+        platform,
+        promptVersionId: prompt.id,
+        promptContent: prompt.content,
+        seedTitle: seed.title,
+        seedNotes: seed.notes ?? null,
+      },
+      async () => {
+        await delayForGeneration(platform);
+        return generateTextFromSeed(seed.title, seed.notes, prompt.content, platform);
+      }
+    );
+
+    if (outcome.reused && outcome.record.draftId) {
+      const existing = listDrafts(orgId, seedId).find((draft) => draft.id === outcome.record.draftId);
+      if (existing) {
+        results.push({ platform, status: 'reused', draft: attachDraftMetadata(existing), reused: true });
+        continue;
+      }
+    }
+
+    if (outcome.record.status !== 'completed' || !outcome.text) {
+      results.push({ platform, status: 'failed', error: outcome.record.error || 'generation_failed' });
+      continue;
+    }
+
+    const generatedAt = Date.now();
+    const draft = createDraft(orgId, seedId, platform, outcome.text, { promptVersionId: prompt.id, generatorRunId: outcome.record.runId, generatedAt });
+    recordDraftMetadata(outcome.record, draft.id, generatedAt, false);
+    results.push({ platform, status: 'generated', draft: attachDraftMetadata(draft) });
+  }
+
+  const drafts = listDrafts(orgId, seedId).map((draft) => attachDraftMetadata(draft));
+  res.json({ seedId, results, drafts });
 });
 
 app.get('/drafts', requireAuth, requireOrg, async (req: any, res) => {
   if (getDriver() === 'prisma') {
     const prisma = getPrisma();
     const items = await prisma.draft.findMany({ where: { orgId: req.orgId, ...(req.query.seedId ? { seedId: String(req.query.seedId) } : {}) }, orderBy: { createdAt: 'desc' } });
-    return res.json({ items });
+    return res.json({ items: items.map((draft: any) => attachDraftMetadata(draft)) });
   }
-  res.json({ items: listDrafts(req.orgId, req.query.seedId as string | undefined) });
+  const items = listDrafts(req.orgId, req.query.seedId as string | undefined).map((draft) => attachDraftMetadata(draft));
+  res.json({ items });
 });
 
 app.post('/drafts/:id/edit', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
@@ -547,11 +660,11 @@ app.post('/drafts/:id/edit', requireAuth, requireOrg, csrfProtection, async (req
   if (getDriver() === 'prisma') {
     const prisma = getPrisma();
     const draft = await prisma.draft.update({ where: { id: req.params.id }, data: { editedText: text } });
-    return res.json({ draft });
+    return res.json({ draft: attachDraftMetadata(draft) });
   }
   const d = editDraft(req.orgId, req.params.id, text);
   if (!d) return res.status(404).json({ error: 'not_found' });
-  res.json({ draft: d });
+  res.json({ draft: attachDraftMetadata(d) });
 });
 
 app.post('/preview/validate', requireAuth, requireOrg, (req: any, res) => {

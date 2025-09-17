@@ -23,6 +23,14 @@ type Draft = {
   platform: string;
   originalText: string;
   editedText?: string | null;
+  createdAt: number;
+  updatedAt: number;
+  generatorMeta?: {
+    promptVersionId?: string | null;
+    runId: string;
+    generatedAt: number;
+    reused: boolean;
+  } | null;
 };
 
 type FilterState = {
@@ -79,6 +87,7 @@ export default function ReviewPage() {
   const [generating, setGenerating] = useState(false);
   const [deletingSeed, setDeletingSeed] = useState(false);
   const [togglingState, setTogglingState] = useState(false);
+  const [generationSummary, setGenerationSummary] = useState<Array<{ platform: string; status: string; error?: string }>>([]);
 
   const availableTags = useMemo(() => {
     const set = new Set<string>();
@@ -173,6 +182,7 @@ export default function ReviewPage() {
       setEditForm({ title: "", notes: "", tags: "" });
       loadDrafts(null);
     }
+    setGenerationSummary([]);
   }, [selectedSeed, loadDrafts]);
 
   async function createSeed() {
@@ -301,6 +311,7 @@ export default function ReviewPage() {
   async function generateDrafts(seedId: string) {
     setGenerating(true);
     setMessage(null);
+    setGenerationSummary([]);
     try {
       const token = await ensureCsrf();
       const response = await fetch(`/api/drafts/generate`, {
@@ -310,8 +321,20 @@ export default function ReviewPage() {
         body: JSON.stringify({ seedId, platforms }),
       });
       if (!response.ok) throw new Error("generate_failed");
-      setMessage("Drafts generated");
-      await loadDrafts(seedId);
+      const payload = await response.json();
+      const summary = (payload.results || []) as Array<{ platform: string; status: string; error?: string }>;
+      setGenerationSummary(summary);
+      const failures = summary.filter((result) => result.status === "failed");
+      if (failures.length) {
+        setMessage(`Generation issues on ${failures.length} platform${failures.length > 1 ? "s" : ""}`);
+      } else {
+        setMessage("Drafts generated");
+      }
+      if (payload.drafts) {
+        setDrafts(payload.drafts as Draft[]);
+      } else {
+        await loadDrafts(seedId);
+      }
     } catch (err) {
       console.error(err);
       setMessage("Failed to generate drafts");
@@ -521,6 +544,32 @@ export default function ReviewPage() {
               <button style={buttonPrimary} onClick={() => generateDrafts(selectedSeed.id)} disabled={generating || platforms.length === 0}>
                 {generating ? "Generating…" : "Generate Drafts"}
               </button>
+              {generationSummary.length > 0 && (
+                <div style={{ background: "#f7f7f7", borderRadius: 8, padding: 12, display: "grid", gap: 6 }}>
+                  <h3 style={{ margin: 0, fontSize: 14 }}>Latest Generation</h3>
+                  {generationSummary.map((result) => (
+                    <div key={result.platform} style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+                      <span>{result.platform}</span>
+                      <span style={{ color: result.status === "failed" ? "#c00" : result.status === "reused" ? "#777" : "#0a8" }}>
+                        {result.status}
+                        {result.error ? ` — ${result.error}` : ""}
+                      </span>
+                    </div>
+                  ))}
+                  {generationSummary.some((result) => result.status === "failed") && (
+                    <button
+                      style={{ ...buttonSecondary, fontSize: 12, padding: "6px 12px", justifySelf: "start" }}
+                      onClick={() => {
+                        const failed = generationSummary.filter((result) => result.status === "failed").map((result) => result.platform);
+                        setPlatforms((prev) => Array.from(new Set([...failed])));
+                        setMessage("Retry platforms reselected");
+                      }}
+                    >
+                      Retry Failed Platforms
+                    </button>
+                  )}
+                </div>
+              )}
               <section>
                 <h3 style={{ margin: "0 0 8px", fontSize: 14 }}>Drafts</h3>
                 {loadingDrafts && <p style={{ color: "#666" }}>Loading drafts…</p>}
@@ -534,6 +583,12 @@ export default function ReviewPage() {
                           Approve
                         </button>
                       </header>
+                      {draft.generatorMeta && (
+                        <p style={{ margin: "4px 0", color: "#777", fontSize: 12 }}>
+                          Generated {formatTimestamp(draft.generatorMeta.generatedAt)} {draft.generatorMeta.reused ? "(reused)" : ""}
+                          {draft.generatorMeta.promptVersionId ? ` • Prompt ${draft.generatorMeta.promptVersionId.substring(0, 6)}` : ""}
+                        </p>
+                      )}
                       <pre style={{ whiteSpace: "pre-wrap", fontSize: 13, marginTop: 8 }}>{draft.editedText || draft.originalText}</pre>
                     </article>
                   ))}
