@@ -68,6 +68,55 @@ function approvalMemoryKey(orgId: string, draftId: string) {
   return `${orgId}:${draftId}`;
 }
 
+async function ensurePrismaSchema(prisma: any) {
+  const globalAny = global as any;
+  if (globalAny.__composrPrismaSchemaEnsured) return;
+  const result: any[] = await prisma.$queryRawUnsafe(`
+    SELECT EXISTS (
+      SELECT 1 FROM information_schema.tables
+      WHERE table_schema = 'public' AND table_name = 'ApprovalJob'
+    ) AS exists;
+  `);
+  const tableExists = result?.[0]?.exists === true || result?.[0]?.exists === 't';
+  if (!tableExists) {
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE "ApprovalJob" (
+        "id" TEXT PRIMARY KEY,
+        "orgId" TEXT NOT NULL,
+        "draftId" TEXT NOT NULL,
+        "jobId" TEXT NOT NULL,
+        "runAt" TIMESTAMP(3) NOT NULL,
+        "status" TEXT NOT NULL DEFAULT 'pending',
+        "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT "ApprovalJob_orgId_fkey" FOREIGN KEY ("orgId") REFERENCES "Org"("id") ON DELETE RESTRICT ON UPDATE CASCADE,
+        CONSTRAINT "ApprovalJob_draftId_fkey" FOREIGN KEY ("draftId") REFERENCES "Draft"("id") ON DELETE RESTRICT ON UPDATE CASCADE
+      );
+    `);
+  }
+  await prisma.$executeRawUnsafe(`
+    CREATE UNIQUE INDEX IF NOT EXISTS "approval_job_org_draft_unique" ON "ApprovalJob" ("orgId", "draftId")
+  `);
+  await prisma.$executeRawUnsafe(`
+    CREATE INDEX IF NOT EXISTS "approval_job_org_draft" ON "ApprovalJob" ("orgId", "draftId")
+  `);
+
+  // History columns
+  await prisma.$executeRawUnsafe(`
+    ALTER TABLE "History" ADD COLUMN IF NOT EXISTS "status" TEXT NOT NULL DEFAULT 'success'
+  `);
+  await prisma.$executeRawUnsafe(`
+    ALTER TABLE "History" ADD COLUMN IF NOT EXISTS "error" TEXT
+  `);
+
+  // Integration unique index
+  await prisma.$executeRawUnsafe(`
+    CREATE UNIQUE INDEX IF NOT EXISTS "integration_org_provider_unique" ON "Integration" ("orgId", "provider")
+  `);
+
+  globalAny.__composrPrismaSchemaEnsured = true;
+}
+
 function normalizePrismaPromptVersion(row: any, sourceVersionId?: string): PromptVersion {
   return {
     id: row.id,
@@ -185,6 +234,7 @@ function toApprovalView(row: any): ApprovalJobView {
 async function getApprovalJob(orgId: string, draftId: string): Promise<ApprovalJobView | null> {
   if (getDriver() === 'prisma') {
     const prisma = getPrisma();
+    await ensurePrismaSchema(prisma);
     const row = await prisma.approvalJob.findUnique({ where: { orgId_draftId: { orgId, draftId } } as any });
     return row ? toApprovalView(row) : null;
   }
@@ -195,6 +245,7 @@ async function getApprovalJob(orgId: string, draftId: string): Promise<ApprovalJ
 async function listApprovalJobs(orgId: string): Promise<ApprovalJobView[]> {
   if (getDriver() === 'prisma') {
     const prisma = getPrisma();
+     await ensurePrismaSchema(prisma);
     const rows = await prisma.approvalJob.findMany({ where: { orgId }, orderBy: { runAt: 'asc' } });
     return rows.map((row: any) => toApprovalView(row));
   }
@@ -208,6 +259,7 @@ async function listApprovalJobs(orgId: string): Promise<ApprovalJobView[]> {
 async function upsertApprovalJob(orgId: string, draftId: string, job: { jobId: string; runAt: number; status: ApprovalJobStatus }): Promise<ApprovalJobView> {
   if (getDriver() === 'prisma') {
     const prisma = getPrisma();
+    await ensurePrismaSchema(prisma);
     const row = await prisma.approvalJob.upsert({
       where: { orgId_draftId: { orgId, draftId } } as any,
       update: { jobId: job.jobId, runAt: new Date(job.runAt), status: job.status },
@@ -234,6 +286,7 @@ async function upsertApprovalJob(orgId: string, draftId: string, job: { jobId: s
 async function updateApprovalJobStatus(orgId: string, draftId: string, status: ApprovalJobStatus, runAt?: number, jobId?: string): Promise<ApprovalJobView | null> {
   if (getDriver() === 'prisma') {
     const prisma = getPrisma();
+    await ensurePrismaSchema(prisma);
     const row = await prisma.approvalJob.findUnique({ where: { orgId_draftId: { orgId, draftId } } as any });
     if (!row) return null;
     const updated = await prisma.approvalJob.update({
@@ -267,6 +320,7 @@ async function scheduleApprovalJob(orgId: string, draftId: string, delayMs: numb
     const runAt = Date.now() + delayMs;
     const jobId = job.id?.toString();
     if (!jobId) throw new Error('job_id_missing');
+    if (getDriver() === 'prisma') await ensurePrismaSchema(getPrisma());
     await upsertApprovalJob(orgId, draftId, { jobId, runAt, status: 'pending' });
     return { id: jobId, runAt };
   }
@@ -291,6 +345,7 @@ async function rescheduleApproval(orgId: string, draftId: string, currentJob: Ap
     const runAt = Date.now() + delayMs;
     const jobId = job.id?.toString();
     if (!jobId) throw new Error('job_id_missing');
+    if (getDriver() === 'prisma') await ensurePrismaSchema(getPrisma());
     await upsertApprovalJob(orgId, draftId, { jobId, runAt, status: 'pending' });
     return { id: jobId, runAt };
   }
@@ -713,6 +768,7 @@ async function buildDraftResponse(orgId: string, drafts: any[]) {
 async function publishDraft(orgId: string, draftId: string) {
   const driver = getDriver();
   const prisma = driver === 'prisma' ? getPrisma() : null;
+  if (prisma) await ensurePrismaSchema(prisma);
   let draft: any;
   if (driver === 'prisma') {
     draft = await prisma!.draft.findUnique({ where: { id: draftId } });
