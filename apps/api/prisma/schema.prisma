@@ -52,6 +52,7 @@ model Integration {
   createdAt DateTime @default(now())
 
   @@index([orgId, provider], name: "integration_org_provider")
+  @@unique([orgId, provider], map: "integration_org_provider_unique")
 }
 
 model PromptVersion {
@@ -121,7 +122,7 @@ model ApprovalJob {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([orgId, draftId], name: "approval_job_org_draft_unique")
+  @@unique([orgId, draftId], map: "approval_job_org_draft_unique")
   @@index([orgId, draftId], name: "approval_job_org_draft")
 }
 

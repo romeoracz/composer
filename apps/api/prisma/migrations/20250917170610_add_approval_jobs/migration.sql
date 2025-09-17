@@ -12,6 +12,7 @@ CREATE TABLE "ApprovalJob" (
 );
 
 CREATE UNIQUE INDEX "approval_job_org_draft_unique" ON "ApprovalJob"("orgId", "draftId");
+CREATE UNIQUE INDEX "approval_job_org_draft_unique" ON "ApprovalJob"("orgId", "draftId");
 CREATE INDEX "approval_job_org_draft" ON "ApprovalJob"("orgId", "draftId");
 
 ALTER TABLE "ApprovalJob"
@@ -24,3 +25,6 @@ ALTER TABLE "ApprovalJob"
 ALTER TABLE "History"
   ADD COLUMN "status" TEXT NOT NULL DEFAULT 'success',
   ADD COLUMN "error" TEXT;
+
+-- Ensure integration org/provider uniqueness
+CREATE UNIQUE INDEX "integration_org_provider_unique" ON "Integration"("orgId", "provider");

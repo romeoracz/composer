@@ -185,7 +185,7 @@ function toApprovalView(row: any): ApprovalJobView {
 async function getApprovalJob(orgId: string, draftId: string): Promise<ApprovalJobView | null> {
   if (getDriver() === 'prisma') {
     const prisma = getPrisma();
-    const row = await prisma.approvalJob.findUnique({ where: { orgId_draftId: { orgId, draftId } } });
+    const row = await prisma.approvalJob.findUnique({ where: { orgId_draftId: { orgId, draftId } } as any });
     return row ? toApprovalView(row) : null;
   }
   const entry = memoryApprovalJobs.get(approvalMemoryKey(orgId, draftId));
@@ -209,7 +209,7 @@ async function upsertApprovalJob(orgId: string, draftId: string, job: { jobId: s
   if (getDriver() === 'prisma') {
     const prisma = getPrisma();
     const row = await prisma.approvalJob.upsert({
-      where: { orgId_draftId: { orgId, draftId } },
+      where: { orgId_draftId: { orgId, draftId } } as any,
       update: { jobId: job.jobId, runAt: new Date(job.runAt), status: job.status },
       create: { orgId, draftId, jobId: job.jobId, runAt: new Date(job.runAt), status: job.status },
     });
@@ -234,7 +234,7 @@ async function upsertApprovalJob(orgId: string, draftId: string, job: { jobId: s
 async function updateApprovalJobStatus(orgId: string, draftId: string, status: ApprovalJobStatus, runAt?: number, jobId?: string): Promise<ApprovalJobView | null> {
   if (getDriver() === 'prisma') {
     const prisma = getPrisma();
-    const row = await prisma.approvalJob.findUnique({ where: { orgId_draftId: { orgId, draftId } } });
+    const row = await prisma.approvalJob.findUnique({ where: { orgId_draftId: { orgId, draftId } } as any });
     if (!row) return null;
     const updated = await prisma.approvalJob.update({
       where: { id: row.id },
@@ -493,7 +493,7 @@ app.post('/integrations/creds/:key', requireAuth, requireOrg, csrfProtection, as
   if (getDriver() === 'prisma') {
     const prisma = getPrisma();
     const record = createSecretRecord(credsInput);
-    await prisma.integration.upsert({ where: { orgId_provider: { orgId: req.orgId, provider: key } }, update: { data: serializeSecretRecord(record) }, create: { orgId: req.orgId, provider: key, data: serializeSecretRecord(record) } });
+    await prisma.integration.upsert({ where: { orgId_provider: { orgId: req.orgId, provider: key } } as any, update: { data: serializeSecretRecord(record) }, create: { orgId: req.orgId, provider: key, data: serializeSecretRecord(record) } });
     return res.json({ ok: true, provider: key, creds: redact(decryptRecord(record)), meta: { lastUpdatedAt: record.lastUpdatedAt } });
   }
   const record = setCredentials(req.orgId, key, credsInput);
@@ -505,7 +505,7 @@ app.post('/integrations/test/:key', requireAuth, requireOrg, csrfProtection, asy
   const key = req.params.key as ProviderKey;
   if (getDriver() === 'prisma') {
     const prisma = getPrisma();
-    const row = await prisma.integration.findUnique({ where: { orgId_provider: { orgId: req.orgId, provider: key } } });
+    const row = await prisma.integration.findUnique({ where: { orgId_provider: { orgId: req.orgId, provider: key } } as any });
     if (!row) return res.json({ ok: false, details: 'credentials_missing' });
     const record = hydrateSecretRecord(row.data);
     if (!record) return res.json({ ok: false, details: 'credentials_invalid' });
@@ -1334,7 +1334,7 @@ app.get('/oauth/:provider/callback', requireAuth, requireOrg, async (req: any, r
   if (getDriver() === 'prisma') {
     const prisma = getPrisma();
     const data = encryptJson({ accessToken: 'stub', refreshToken: 'stub', obtainedAt: Date.now() });
-    await prisma.integration.upsert({ where: { orgId_provider: { orgId: req.orgId, provider } }, update: { data }, create: { orgId: req.orgId, provider, data } });
+    await prisma.integration.upsert({ where: { orgId_provider: { orgId: req.orgId, provider } } as any, update: { data }, create: { orgId: req.orgId, provider, data } });
   }
   return res.json({ ok: true });
 });
