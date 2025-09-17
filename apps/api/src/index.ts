@@ -6,7 +6,7 @@ import { WebSocketServer } from 'ws';
 import cookieSession from 'cookie-session';
 import cookieParser from 'cookie-parser';
 import csrf from 'csurf';
-import { collectDefaultMetrics, createHistogram, register as metricsRegister } from './metrics.js';
+import { collectDefaultMetrics, createHistogram, register as metricsRegister } from './metrics';
 import { getProvidersInfo, getAdapterByKey } from './providers/registry';
 import { addMetric, listMetrics } from './analytics';
 import { generateCSV, generatePDF } from './exports';
