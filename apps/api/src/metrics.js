@@ -90,6 +90,13 @@ export function collectDefaultMetrics() {
   // No-op placeholder
 }
 
+export default {
+  register,
+  collectDefaultMetrics,
+  createHistogram,
+  Histogram,
+};
+
 export { Histogram };
 
 /**

@@ -20,3 +20,11 @@ export declare const register: {
 export declare function collectDefaultMetrics(): void;
 export { Histogram };
 export declare function createHistogram(options: HistogramOptions): Histogram;
+
+declare const _default: {
+  register: typeof register;
+  collectDefaultMetrics: typeof collectDefaultMetrics;
+  createHistogram: typeof createHistogram;
+  Histogram: typeof Histogram;
+};
+export default _default;
