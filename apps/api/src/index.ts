@@ -6,7 +6,7 @@ import { WebSocketServer } from 'ws';
 import cookieSession from 'cookie-session';
 import cookieParser from 'cookie-parser';
 import csrf from 'csurf';
-import client from 'prom-client';
+import { collectDefaultMetrics, createHistogram, register as metricsRegister } from './metrics';
 import { getProvidersInfo, getAdapterByKey } from './providers/registry';
 import { addMetric, listMetrics } from './analytics';
 import { generateCSV, generatePDF } from './exports';
@@ -47,8 +47,8 @@ app.use(helmet({
 }));
 
 // Prometheus metrics
-client.collectDefaultMetrics();
-const httpReqDuration = new client.Histogram({ name: 'http_request_duration_ms', help: 'HTTP request duration ms', labelNames: ['method', 'path', 'status'], buckets: [5, 10, 25, 50, 100, 250, 500, 1000] });
+collectDefaultMetrics();
+const httpReqDuration = createHistogram({ name: 'http_request_duration_ms', help: 'HTTP request duration ms', labelNames: ['method', 'path', 'status'], buckets: [5, 10, 25, 50, 100, 250, 500, 1000] });
 app.use((req, res, next) => {
   const start = Date.now();
   res.on('finish', () => {
@@ -59,8 +59,8 @@ app.use((req, res, next) => {
 });
 
 app.get('/metrics', async (_req, res) => {
-  res.setHeader('Content-Type', client.register.contentType);
-  res.end(await client.register.metrics());
+  res.setHeader('Content-Type', metricsRegister.contentType);
+  res.end(await metricsRegister.metrics());
 });
 
 const WEB_ORIGIN = process.env.WEB_ORIGIN || 'http://localhost:3000';
@@ -158,8 +158,9 @@ app.get('/integrations/status', requireAuth, requireOrg, async (req: any, res) =
   if (getDriver() === 'prisma') {
     const prisma = getPrisma();
     const rows = await prisma.integration.findMany({ where: { orgId: req.orgId } });
+    type IntegrationRow = (typeof rows)[number];
     const providers = ['linkedin', 'x', 'instagram', 'facebook', 'tiktok'].map((k) => {
-      const row = rows.find((r) => r.provider === k);
+      const row = rows.find((integration: IntegrationRow) => integration.provider === k);
       return { key: k, hasCreds: !!row, creds: row ? { clientId: '***', clientSecret: '***' } : undefined };
     });
     return res.json({ providers });
@@ -495,7 +496,7 @@ app.post('/schedules/:id/reschedule', requireAuth, requireOrg, csrfProtection, a
 // Exports
 app.get('/exports/csv', requireAuth, requireOrg, (req: any, res) => {
   const { platform, from, to } = req.query as any;
-  const csv = generateCSV({ platform, from: from ? Number(from) : undefined, to: to ? Number(to) : undefined });
+  const csv = generateCSV({ orgId: req.orgId, platform, from: from ? Number(from) : undefined, to: to ? Number(to) : undefined });
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', 'attachment; filename="analytics.csv"');
   res.send(csv);
@@ -503,7 +504,7 @@ app.get('/exports/csv', requireAuth, requireOrg, (req: any, res) => {
 
 app.get('/exports/pdf', requireAuth, requireOrg, async (req: any, res) => {
   const { platform, from, to } = req.query as any;
-  const pdf = await generatePDF({ platform, from: from ? Number(from) : undefined, to: to ? Number(to) : undefined });
+  const pdf = await generatePDF({ orgId: req.orgId, platform, from: from ? Number(from) : undefined, to: to ? Number(to) : undefined });
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', 'attachment; filename="analytics.pdf"');
   res.send(pdf);

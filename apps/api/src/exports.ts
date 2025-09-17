@@ -1,7 +1,7 @@
 import { listMetrics } from './analytics';
 import PDFDocument from 'pdfkit';
 
-export function generateCSV(params: { platform?: string; from?: number; to?: number }) {
+export function generateCSV(params: { orgId: string; platform?: string; from?: number; to?: number }) {
   const rows = listMetrics(params);
   const header = ['postId', 'platform', 'likes', 'comments', 'shares', 'impressions', 'at'];
   const lines = [header.join(',')];
@@ -19,12 +19,12 @@ export function generateCSV(params: { platform?: string; from?: number; to?: num
   return lines.join('\n');
 }
 
-export function generatePDF(params: { platform?: string; from?: number; to?: number }): Promise<Buffer> {
+export function generatePDF(params: { orgId: string; platform?: string; from?: number; to?: number }): Promise<Buffer> {
   return new Promise((resolve) => {
     const rows = listMetrics(params);
     const doc = new PDFDocument({ margin: 36 });
     const chunks: Buffer[] = [];
-    doc.on('data', (c) => chunks.push(c as Buffer));
+    doc.on('data', (chunk: Buffer) => chunks.push(chunk));
     doc.on('end', () => resolve(Buffer.concat(chunks)));
 
     doc.fontSize(18).text('ComposR Analytics Report');

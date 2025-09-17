@@ -36,7 +36,7 @@ function genId(prefix: string) {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
-export function recordActivity(orgId: string, entry: Omit<Activity, 'id' | 'at'>) {
+export function recordActivity(orgId: string, entry: Omit<Activity, 'id' | 'at' | 'orgId'>) {
   const list = (activityByOrg[orgId] ||= []);
   list.push({ id: genId('act'), at: Date.now(), orgId, ...entry });
 }
@@ -51,7 +51,7 @@ export function createSuggestion(orgId: string, content: string, createdBy: stri
     createdAt: Date.now(),
   };
   (suggestionsByOrg[orgId] ||= []).push(s);
-  recordActivity(orgId, { orgId, actor: createdBy, type: 'suggest', refId: s.id });
+  recordActivity(orgId, { actor: createdBy, type: 'suggest', refId: s.id });
   return s;
 }
 
@@ -62,7 +62,7 @@ export function listSuggestions(orgId: string): Suggestion[] {
 export function addComment(orgId: string, suggestionId: string, text: string, author: string): Comment {
   const c: Comment = { id: genId('cmt'), suggestionId, orgId, text, author, createdAt: Date.now() };
   (commentsByOrg[orgId] ||= []).push(c);
-  recordActivity(orgId, { orgId, actor: author, type: 'comment', refId: suggestionId });
+  recordActivity(orgId, { actor: author, type: 'comment', refId: suggestionId });
   return c;
 }
 
@@ -75,7 +75,7 @@ export function approveSuggestion(orgId: string, suggestionId: string, approver:
   const s = list.find((x) => x.id === suggestionId);
   if (!s) throw new Error('not_found');
   s.status = 'approved';
-  recordActivity(orgId, { orgId, actor: approver, type: 'approve', refId: suggestionId });
+  recordActivity(orgId, { actor: approver, type: 'approve', refId: suggestionId });
   return s;
 }
 
