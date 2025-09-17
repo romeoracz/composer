@@ -14,39 +14,42 @@ datasource db {
 }
 
 model Org {
-  id           String        @id @default(cuid())
+  id           String          @id @default(cuid())
   name         String
   memberships  Membership[]
   prompts      PromptVersion[]
   seeds        Seed[]
   drafts       Draft[]
   histories    History[]
+  draftAudits  DraftAudit[]
   metrics      Metric[]
   schedules    Schedule[]
   integrations Integration[]
   suggestions  Suggestion[]
   comments     Comment[]
   activities   Activity[]
-  createdAt    DateTime      @default(now())
+  createdAt    DateTime        @default(now())
 }
 
 model Membership {
-  id       String @id @default(cuid())
-  org      Org    @relation(fields: [orgId], references: [id])
-  orgId    String
-  email    String
-  role     String
+  id        String   @id @default(cuid())
+  org       Org      @relation(fields: [orgId], references: [id])
+  orgId     String
+  email     String
+  role      String
   createdAt DateTime @default(now())
+
   @@index([orgId, email], name: "membership_org_email")
 }
 
 model Integration {
-  id       String @id @default(cuid())
-  org      Org    @relation(fields: [orgId], references: [id])
-  orgId    String
-  provider String
-  data     Json
+  id        String   @id @default(cuid())
+  org       Org      @relation(fields: [orgId], references: [id])
+  orgId     String
+  provider  String
+  data      Json
   createdAt DateTime @default(now())
+
   @@index([orgId, provider], name: "integration_org_provider")
 }
 
@@ -61,8 +64,8 @@ model PromptVersion {
 }
 
 model Seed {
-  id        String   @id @default(cuid())
-  org       Org      @relation(fields: [orgId], references: [id])
+  id        String    @id @default(cuid())
+  org       Org       @relation(fields: [orgId], references: [id])
   orgId     String
   title     String
   notes     String?
@@ -70,25 +73,25 @@ model Seed {
   state     String
   drafts    Draft[]
   histories History[]
-  createdAt DateTime @default(now())
+  createdAt DateTime  @default(now())
 }
 
 model Draft {
-  id           String   @id @default(cuid())
-  org          Org      @relation(fields: [orgId], references: [id])
-  orgId        String
-  seed         Seed     @relation(fields: [seedId], references: [id])
-  seedId       String
-  platform     String
-  originalText String
-  editedText   String?
+  id              String       @id @default(cuid())
+  org             Org          @relation(fields: [orgId], references: [id])
+  orgId           String
+  seed            Seed         @relation(fields: [seedId], references: [id])
+  seedId          String
+  platform        String
+  originalText    String
+  editedText      String?
   promptVersionId String?
   generatorRunId  String?
   generatedAt     DateTime?
-  histories    History[]
-  audits       DraftAudit[]
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  histories       History[]
+  audits          DraftAudit[]
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
 }
 
 model DraftAudit {
@@ -121,16 +124,16 @@ model History {
 }
 
 model Metric {
-  id         String   @id @default(cuid())
-  org        Org      @relation(fields: [orgId], references: [id])
-  orgId      String
-  postId     String
-  platform   String
-  likes      Int
-  comments   Int
-  shares     Int
+  id          String   @id @default(cuid())
+  org         Org      @relation(fields: [orgId], references: [id])
+  orgId       String
+  postId      String
+  platform    String
+  likes       Int
+  comments    Int
+  shares      Int
   impressions Int?
-  at         DateTime
+  at          DateTime
 }
 
 model Schedule {
@@ -143,36 +146,36 @@ model Schedule {
 }
 
 model Suggestion {
-  id        String   @id @default(cuid())
-  org       Org      @relation(fields: [orgId], references: [id])
-  orgId     String
-  content   String
-  createdBy String
-  status    String
-  createdAt DateTime @default(now())
-  comments  Comment[]
+  id         String     @id @default(cuid())
+  org        Org        @relation(fields: [orgId], references: [id])
+  orgId      String
+  content    String
+  createdBy  String
+  status     String
+  createdAt  DateTime   @default(now())
+  comments   Comment[]
   activities Activity[]
 }
 
 model Comment {
-  id           String   @id @default(cuid())
-  org          Org      @relation(fields: [orgId], references: [id])
+  id           String     @id @default(cuid())
+  org          Org        @relation(fields: [orgId], references: [id])
   orgId        String
   suggestion   Suggestion @relation(fields: [suggestionId], references: [id])
   suggestionId String
   text         String
   author       String
-  createdAt    DateTime @default(now())
+  createdAt    DateTime   @default(now())
 }
 
 model Activity {
-  id           String   @id @default(cuid())
-  org          Org      @relation(fields: [orgId], references: [id])
+  id           String      @id @default(cuid())
+  org          Org         @relation(fields: [orgId], references: [id])
   orgId        String
   type         String
   refId        String?
   actor        String
-  at           DateTime @default(now())
+  at           DateTime    @default(now())
   suggestion   Suggestion? @relation(fields: [suggestionId], references: [id])
   suggestionId String?
 }
