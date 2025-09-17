@@ -19,7 +19,15 @@ export function listSeeds(orgId: string): Seed[] {
 }
 
 export function createSeed(orgId: string, input: Omit<Seed, 'id' | 'createdAt' | 'orgId'>): Seed {
-  const seed: Seed = { id: genId('seed'), orgId, createdAt: Date.now(), ...input } as Seed;
+  const seed: Seed = {
+    id: genId('seed'),
+    orgId,
+    createdAt: Date.now(),
+    title: input.title,
+    notes: input.notes,
+    tags: input.tags ?? [],
+    state: input.state,
+  };
   (seedsByOrg[orgId] ||= []).push(seed);
   return seed;
 }
@@ -29,6 +37,7 @@ export function updateSeed(orgId: string, id: string, patch: Partial<Omit<Seed, 
   const s = list.find((x) => x.id === id);
   if (!s) return undefined;
   Object.assign(s, patch);
+  if (patch.tags !== undefined) s.tags = patch.tags;
   return s;
 }
 

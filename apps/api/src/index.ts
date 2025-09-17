@@ -43,6 +43,11 @@ type PromptVersionView = {
   diff?: DiffSegment[];
 };
 
+type SeedState = 'draft' | 'ready';
+type SeedFilters = { state?: SeedState; tag?: string; search?: string };
+
+const VALID_SEED_STATES: SeedState[] = ['draft', 'ready'];
+
 function normalizePrismaPromptVersion(row: any, sourceVersionId?: string): PromptVersion {
   return {
     id: row.id,
@@ -83,6 +88,94 @@ function buildPromptResponsePayload(versions: PromptVersion[], activeVersion?: P
   const views = sorted.map((version) => toPromptView(version, activeId, activeContent));
   const activeView = views.find((v) => v.id === activeId) ?? null;
   return { active: activeView, versions: views };
+}
+
+function serializeSeed(seed: any) {
+  return {
+    ...seed,
+    tags: Array.isArray(seed.tags) ? seed.tags : [],
+    createdAt: seed.createdAt instanceof Date ? seed.createdAt.getTime() : seed.createdAt,
+  };
+}
+
+function parseSeedFilters(query: any): SeedFilters {
+  const filters: SeedFilters = {};
+  const stateRaw = query?.state;
+  if (stateRaw && typeof stateRaw === 'string' && VALID_SEED_STATES.includes(stateRaw as SeedState)) {
+    filters.state = stateRaw as SeedState;
+  }
+  const tagRaw = query?.tag;
+  if (tagRaw && typeof tagRaw === 'string' && tagRaw.trim().length) {
+    filters.tag = tagRaw.trim();
+  }
+  const searchRaw = query?.q || query?.search;
+  if (searchRaw && typeof searchRaw === 'string' && searchRaw.trim().length) {
+    filters.search = searchRaw.trim();
+  }
+  return filters;
+}
+
+function parseTagsInput(input: unknown): string[] {
+  if (!input) return [];
+  const source = Array.isArray(input)
+    ? input
+    : typeof input === 'string'
+      ? input.split(/[,\n]/)
+      : [];
+  const seen = new Set<string>();
+  const tags: string[] = [];
+  for (const raw of source) {
+    if (typeof raw !== 'string') continue;
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    const lower = trimmed.toLowerCase();
+    if (!seen.has(lower)) {
+      seen.add(lower);
+      tags.push(trimmed);
+    }
+  }
+  return tags.slice(0, 10);
+}
+
+function normalizeSeedCreate(body: any) {
+  const title = typeof body?.title === 'string' ? body.title.trim() : '';
+  if (!title) {
+    throw Object.assign(new Error('title_required'), { status: 400 });
+  }
+  const notesRaw = typeof body?.notes === 'string' ? body.notes.trim() : undefined;
+  const notes = notesRaw && notesRaw.length ? notesRaw : undefined;
+  const tags = parseTagsInput(body?.tags);
+  const stateRaw = typeof body?.state === 'string' ? body.state.trim().toLowerCase() : undefined;
+  const state: SeedState = VALID_SEED_STATES.includes(stateRaw as SeedState) ? (stateRaw as SeedState) : 'draft';
+  return { title, notes, tags, state };
+}
+
+function normalizeSeedPatch(body: any) {
+  const patch: { title?: string; notes?: string | null; tags?: string[]; state?: SeedState } = {};
+  if ('title' in body) {
+    const title = typeof body.title === 'string' ? body.title.trim() : '';
+    if (!title) throw Object.assign(new Error('title_required'), { status: 400 });
+    patch.title = title;
+  }
+  if ('notes' in body) {
+    if (typeof body.notes === 'string') {
+      const trimmed = body.notes.trim();
+      patch.notes = trimmed.length ? trimmed : null;
+    } else if (body.notes == null) {
+      patch.notes = null;
+    }
+  }
+  if ('tags' in body) {
+    patch.tags = parseTagsInput(body.tags);
+  }
+  if ('state' in body) {
+    const stateRaw = typeof body.state === 'string' ? body.state.trim().toLowerCase() : undefined;
+    if (!stateRaw || !VALID_SEED_STATES.includes(stateRaw as SeedState)) {
+      throw Object.assign(new Error('invalid_state'), { status: 400 });
+    }
+    patch.state = stateRaw as SeedState;
+  }
+  return patch;
 }
 
 const app = express();
@@ -325,39 +418,81 @@ app.post('/prompts/activate', requireAuth, requireOrg, csrfProtection, async (re
 
 // Seeds (Stage 4)
 app.get('/seeds', requireAuth, requireOrg, async (req: any, res) => {
+  const filters = parseSeedFilters(req.query);
   if (getDriver() === 'prisma') {
     const prisma = getPrisma();
-    const items = await prisma.seed.findMany({ where: { orgId: req.orgId }, orderBy: { createdAt: 'desc' } });
-    return res.json({ items });
+    const baseWhere: any = { orgId: req.orgId };
+    if (filters.state) baseWhere.state = filters.state;
+    if (filters.tag) baseWhere.tags = { has: filters.tag };
+    const andClauses: any[] = [];
+    if (filters.search) {
+      andClauses.push({
+        OR: [
+          { title: { contains: filters.search, mode: 'insensitive' } },
+          { notes: { contains: filters.search, mode: 'insensitive' } },
+        ],
+      });
+    }
+    const where = andClauses.length ? { ...baseWhere, AND: andClauses } : baseWhere;
+    const rows = await prisma.seed.findMany({ where, orderBy: { createdAt: 'desc' } });
+    const items = rows.map((row: any) => serializeSeed(row));
+    return res.json({ items, filters, meta: { count: items.length } });
   }
-  res.json({ items: listSeeds(req.orgId) });
+  const items = listSeeds(req.orgId).filter((seed) => {
+    if (filters.state && seed.state !== filters.state) return false;
+    const tags = seed.tags || [];
+    if (filters.tag && !tags.some((tag) => tag.toLowerCase() === filters.tag?.toLowerCase())) return false;
+    if (filters.search) {
+      const haystack = `${seed.title}\n${seed.notes ?? ''}`.toLowerCase();
+      if (!haystack.includes(filters.search.toLowerCase())) return false;
+    }
+    return true;
+  }).map((seed) => ({ ...seed, tags: seed.tags || [] }));
+  res.json({ items, filters, meta: { count: items.length } });
 });
 
 app.post('/seeds', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
-  const payload = {
-    title: String(req.body?.title || ''),
-    notes: req.body?.notes,
-    tags: (req.body?.tags || []) as string[],
-    state: 'draft' as const,
-  };
+  let payload;
+  try {
+    payload = normalizeSeedCreate(req.body || {});
+  } catch (err: any) {
+    const status = err?.status || 400;
+    return res.status(status).json({ error: err?.message || 'invalid_seed' });
+  }
   if (getDriver() === 'prisma') {
     const prisma = getPrisma();
-    const seed = await prisma.seed.create({ data: { orgId: req.orgId, ...payload } });
-    return res.json({ seed });
+    const seed = await prisma.seed.create({ data: { orgId: req.orgId, title: payload.title, notes: payload.notes ?? null, tags: payload.tags, state: payload.state } });
+    return res.json({ seed: serializeSeed(seed) });
   }
   const s = createSeed(req.orgId, payload);
-  res.json({ seed: s });
+  res.json({ seed: { ...s, tags: s.tags || [] } });
 });
 
 app.post('/seeds/:id', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
+  let patch;
+  try {
+    patch = normalizeSeedPatch(req.body || {});
+  } catch (err: any) {
+    const status = err?.status || 400;
+    return res.status(status).json({ error: err?.message || 'invalid_seed' });
+  }
   if (getDriver() === 'prisma') {
     const prisma = getPrisma();
-    const seed = await prisma.seed.update({ where: { id: req.params.id }, data: req.body || {} });
-    return res.json({ seed });
+    const seed = await prisma.seed.update({ where: { id: req.params.id }, data: {
+      ...(patch.title !== undefined ? { title: patch.title } : {}),
+      ...(patch.notes !== undefined ? { notes: patch.notes } : {}),
+      ...(patch.tags !== undefined ? { tags: patch.tags } : {}),
+      ...(patch.state !== undefined ? { state: patch.state } : {}),
+    } });
+    return res.json({ seed: serializeSeed(seed) });
   }
-  const s = updateSeed(req.orgId, req.params.id, req.body || {});
+  const memoryPatch = { ...patch } as any;
+  if (patch.notes === null) {
+    memoryPatch.notes = undefined;
+  }
+  const s = updateSeed(req.orgId, req.params.id, memoryPatch);
   if (!s) return res.status(404).json({ error: 'not_found' });
-  res.json({ seed: s });
+  res.json({ seed: { ...s, tags: s.tags || [] } });
 });
 
 app.delete('/seeds/:id', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
