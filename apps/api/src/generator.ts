@@ -95,6 +95,9 @@ export async function ensureGeneration(
 ): Promise<GenerationOutcome> {
   const existing = recordsByKey.get(computeIdempotencyKey(ctx));
   if (existing && existing.status === 'completed' && existing.draftId) {
+    existing.reused = true;
+    recordsByKey.set(existing.idempotencyKey, existing);
+    recordsByRunId.set(existing.runId, existing);
     return { reused: true, record: { ...existing, reused: true } };
   }
 

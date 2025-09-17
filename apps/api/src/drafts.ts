@@ -12,7 +12,17 @@ export type Draft = {
   generatedAt?: number;
 };
 
+export type DraftAudit = {
+  id: string;
+  orgId: string;
+  draftId: string;
+  editor: string;
+  editedText: string;
+  createdAt: number;
+};
+
 const draftsByOrg: Record<string, Draft[]> = {};
+const draftAuditsByOrg: Record<string, DraftAudit[]> = {};
 
 function genId(prefix: string) {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
@@ -49,11 +59,30 @@ export function createDraft(
   return d;
 }
 
-export function editDraft(orgId: string, id: string, editedText: string): Draft | undefined {
+export function editDraft(orgId: string, id: string, editedText: string, editor?: string): Draft | undefined {
   const list = (draftsByOrg[orgId] ||= []);
   const d = list.find((x) => x.id === id);
   if (!d) return undefined;
   d.editedText = editedText;
   d.updatedAt = Date.now();
+  if (editor) {
+    recordAudit(orgId, {
+      id: genId('audit'),
+      orgId,
+      draftId: id,
+      editor,
+      editedText,
+      createdAt: Date.now(),
+    });
+  }
   return d;
+}
+
+export function listDraftAudits(orgId: string, draftId: string): DraftAudit[] {
+  return (draftAuditsByOrg[orgId] || []).filter((audit) => audit.draftId === draftId).slice().sort((a, b) => b.createdAt - a.createdAt);
+}
+
+export function recordAudit(orgId: string, audit: DraftAudit) {
+  const list = (draftAuditsByOrg[orgId] ||= []);
+  list.push(audit);
 }

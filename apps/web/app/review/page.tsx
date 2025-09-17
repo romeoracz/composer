@@ -33,6 +33,21 @@ type Draft = {
   } | null;
 };
 
+type DraftAudit = {
+  id: string;
+  editor: string;
+  editedText: string;
+  createdAt: number;
+};
+
+type ProviderInfo = {
+  key: string;
+  displayName: string;
+  constraints: {
+    maxTextLength?: number;
+  };
+};
+
 type FilterState = {
   state: "all" | SeedState;
   tag: string | null;
@@ -88,6 +103,14 @@ export default function ReviewPage() {
   const [deletingSeed, setDeletingSeed] = useState(false);
   const [togglingState, setTogglingState] = useState(false);
   const [generationSummary, setGenerationSummary] = useState<Array<{ platform: string; status: string; error?: string }>>([]);
+  const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [selectedDraftId, setSelectedDraftId] = useState<string | null>(null);
+  const [draftDetails, setDraftDetails] = useState<Draft | null>(null);
+  const [draftAuditTrail, setDraftAuditTrail] = useState<DraftAudit[]>([]);
+  const [draftEditText, setDraftEditText] = useState<string>("");
+  const [validationErrors, setValidationErrors] = useState<string[]>([]);
+  const [validating, setValidating] = useState(false);
+  const [savingDraft, setSavingDraft] = useState(false);
 
   const availableTags = useMemo(() => {
     const set = new Set<string>();
@@ -147,28 +170,92 @@ export default function ReviewPage() {
     return data.csrfToken as string;
   }, [csrfToken]);
 
-  const loadDrafts = useCallback(async (seedId: string | null) => {
-    if (!seedId) {
-      setDrafts([]);
-      return;
-    }
-    setLoadingDrafts(true);
+  const loadDrafts = useCallback(
+    async (seedId: string | null) => {
+      if (!seedId) {
+        setDrafts([]);
+        setSelectedDraftId(null);
+        return;
+      }
+      setLoadingDrafts(true);
+      try {
+        const response = await fetch(`/api/drafts?seedId=${seedId}`, { credentials: "include" });
+        if (!response.ok) throw new Error("drafts_failed");
+        const data = await response.json();
+        const items = (data.items || []) as Draft[];
+        setDrafts(items);
+        if (items.length) {
+          setSelectedDraftId((prev) => (prev && items.some((draft) => draft.id === prev) ? prev : items[0].id));
+        } else {
+          setSelectedDraftId(null);
+        }
+      } catch (err) {
+        console.error(err);
+        setMessage("Failed to load drafts");
+      } finally {
+        setLoadingDrafts(false);
+      }
+    },
+    []
+  );
+
+  const loadDraftDetails = useCallback(
+    async (draftId: string) => {
+      try {
+        const response = await fetch(`/api/drafts/${draftId}`, { credentials: "include" });
+        if (!response.ok) throw new Error("draft_detail_failed");
+        const data: { draft: Draft; audits: DraftAudit[] } = await response.json();
+        setDraftDetails(data.draft);
+        setDraftEditText(data.draft.editedText ?? data.draft.originalText);
+        setDraftAuditTrail(data.audits || []);
+        setValidationErrors([]);
+      } catch (err) {
+        console.error(err);
+        setMessage("Unable to load draft details");
+      }
+    },
+    []
+  );
+
+  async function validateDraftText(platform: string, text: string, signal?: AbortSignal) {
+    setValidating(true);
     try {
-      const response = await fetch(`/api/drafts?seedId=${seedId}`, { credentials: "include" });
-      if (!response.ok) throw new Error("drafts_failed");
-      const data = await response.json();
-      setDrafts(data.items || []);
+      const response = await fetch(`/api/preview/validate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ platform, text }),
+        signal,
+      });
+      if (!response.ok) throw new Error("validation_failed");
+      const result = await response.json();
+      setValidationErrors(result.errors || []);
     } catch (err) {
+      const error = err as { name?: string };
+      if (error?.name === "AbortError") return;
       console.error(err);
-      setMessage("Failed to load drafts");
+      setValidationErrors(["Validation error"]);
     } finally {
-      setLoadingDrafts(false);
+      setValidating(false);
     }
-  }, []);
+  }
 
   useEffect(() => {
     loadSeeds();
   }, [loadSeeds]);
+
+  useEffect(() => {
+    async function fetchProviders() {
+      try {
+        const response = await fetch("/api/providers", { credentials: "include" });
+        if (!response.ok) return;
+        const data = await response.json();
+        setProviders(data.providers || []);
+      } catch (err) {
+        console.error(err);
+      }
+    }
+    fetchProviders();
+  }, []);
 
   useEffect(() => {
     if (selectedSeed) {
@@ -177,13 +264,49 @@ export default function ReviewPage() {
         notes: selectedSeed.notes ?? "",
         tags: selectedSeed.tags.join(", "),
       });
+      setSelectedDraftId(null);
+      setDraftDetails(null);
+      setDraftAuditTrail([]);
+      setDraftEditText("");
+      setValidationErrors([]);
       loadDrafts(selectedSeed.id);
     } else {
       setEditForm({ title: "", notes: "", tags: "" });
+      setSelectedDraftId(null);
+      setDraftDetails(null);
+      setDraftAuditTrail([]);
+      setDraftEditText("");
+      setValidationErrors([]);
       loadDrafts(null);
     }
     setGenerationSummary([]);
   }, [selectedSeed, loadDrafts]);
+
+  useEffect(() => {
+    if (!selectedDraftId) {
+      setDraftDetails(null);
+      setDraftAuditTrail([]);
+      setDraftEditText("");
+      setValidationErrors([]);
+      return;
+    }
+    loadDraftDetails(selectedDraftId);
+  }, [selectedDraftId, loadDraftDetails]);
+
+  useEffect(() => {
+    if (!draftDetails) return;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => {
+      validateDraftText(draftDetails.platform, draftEditText, controller.signal).catch((err) => {
+        if (err?.name === "AbortError") return;
+        console.error(err);
+      });
+    }, 200);
+    return () => {
+      controller.abort();
+      clearTimeout(timeout);
+    };
+  }, [draftDetails, draftEditText]);
 
   async function createSeed() {
     if (!seedForm.title.trim()) {
@@ -308,6 +431,42 @@ export default function ReviewPage() {
     }
   }
 
+  async function saveDraftEdits() {
+    if (!draftDetails) return;
+    setSavingDraft(true);
+    setMessage(null);
+    try {
+      const token = await ensureCsrf();
+      const response = await fetch(`/api/drafts/${draftDetails.id}/edit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "CSRF-Token": token },
+        credentials: "include",
+        body: JSON.stringify({ text: draftEditText }),
+      });
+      if (!response.ok) throw new Error("save_failed");
+      const data = await response.json();
+      const updatedDraft = data.draft as Draft;
+      setDraftDetails(updatedDraft);
+      setDraftAuditTrail(data.audits || []);
+      setDrafts((prev) => prev.map((draft) => (draft.id === updatedDraft.id ? updatedDraft : draft)));
+      setMessage("Draft updated");
+    } catch (err) {
+      console.error(err);
+      setMessage("Unable to save draft edits");
+    } finally {
+      setSavingDraft(false);
+    }
+  }
+
+  function resetDraftEdits() {
+    if (!draftDetails) return;
+    setDraftEditText(draftDetails.originalText);
+  }
+
+  function getConstraintsForPlatform(platform: string) {
+    return providers.find((provider) => provider.key === platform)?.constraints;
+  }
+
   async function generateDrafts(seedId: string) {
     setGenerating(true);
     setMessage(null);
@@ -331,7 +490,11 @@ export default function ReviewPage() {
         setMessage("Drafts generated");
       }
       if (payload.drafts) {
-        setDrafts(payload.drafts as Draft[]);
+        const items = payload.drafts as Draft[];
+        setDrafts(items);
+        if (items.length) {
+          setSelectedDraftId((prev) => (prev && items.some((draft) => draft.id === prev) ? prev : items[0].id));
+        }
       } else {
         await loadDrafts(seedId);
       }
@@ -575,24 +738,128 @@ export default function ReviewPage() {
                 {loadingDrafts && <p style={{ color: "#666" }}>Loading drafts…</p>}
                 {!loadingDrafts && drafts.length === 0 && <p style={{ color: "#666" }}>No drafts yet for this seed.</p>}
                 <div style={{ display: "grid", gap: 12 }}>
-                  {drafts.map((draft) => (
-                    <article key={draft.id} style={{ border: "1px solid #eee", borderRadius: 8, padding: 12 }}>
-                      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                        <strong>{draft.platform}</strong>
-                        <button style={{ ...buttonSecondary, fontSize: 12, padding: "4px 10px" }} onClick={() => approveDraft(draft.id)}>
-                          Approve
-                        </button>
-                      </header>
-                      {draft.generatorMeta && (
-                        <p style={{ margin: "4px 0", color: "#777", fontSize: 12 }}>
-                          Generated {formatTimestamp(draft.generatorMeta.generatedAt)} {draft.generatorMeta.reused ? "(reused)" : ""}
-                          {draft.generatorMeta.promptVersionId ? ` • Prompt ${draft.generatorMeta.promptVersionId.substring(0, 6)}` : ""}
+                  {drafts.map((draft) => {
+                    const selected = draft.id === selectedDraftId;
+                    return (
+                      <article
+                        key={draft.id}
+                        onClick={() => setSelectedDraftId(draft.id)}
+                        style={{
+                          border: "1px solid",
+                          borderColor: selected ? "#0a8" : "#eee",
+                          borderRadius: 8,
+                          padding: 12,
+                          cursor: "pointer",
+                          background: selected ? "rgba(10,136,96,0.05)" : "#fff",
+                          display: "grid",
+                          gap: 6,
+                        }}
+                      >
+                        <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                          <strong>{draft.platform}</strong>
+                          <div style={{ display: "flex", gap: 8 }}>
+                            <button
+                              style={{ ...buttonSecondary, fontSize: 12, padding: "4px 10px" }}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                approveDraft(draft.id);
+                              }}
+                            >
+                              Approve
+                            </button>
+                          </div>
+                        </header>
+                        {draft.generatorMeta && (
+                          <p style={{ margin: "4px 0", color: "#777", fontSize: 12 }}>
+                            Generated {formatTimestamp(draft.generatorMeta.generatedAt)} {draft.generatorMeta.reused ? "(reused)" : ""}
+                            {draft.generatorMeta.promptVersionId ? ` • Prompt ${draft.generatorMeta.promptVersionId.substring(0, 6)}` : ""}
+                          </p>
+                        )}
+                        <p style={{ margin: 0, color: "#999", fontSize: 11 }}>
+                          Updated {formatTimestamp(draft.updatedAt)}
                         </p>
-                      )}
-                      <pre style={{ whiteSpace: "pre-wrap", fontSize: 13, marginTop: 8 }}>{draft.editedText || draft.originalText}</pre>
-                    </article>
-                  ))}
+                        <pre style={{ whiteSpace: "pre-wrap", fontSize: 13, marginTop: 2, maxHeight: 140, overflow: "hidden" }}>
+                          {(draft.editedText || draft.originalText).slice(0, 220)}
+                          {((draft.editedText || draft.originalText).length ?? 0) > 220 ? "…" : ""}
+                        </pre>
+                      </article>
+                    );
+                  })}
                 </div>
+                {selectedDraftId && draftDetails && (
+                  <div style={{ marginTop: 16, borderTop: "1px solid #eee", paddingTop: 16 }}>
+                    {(() => {
+                      const constraints = getConstraintsForPlatform(draftDetails.platform);
+                      const max = constraints?.maxTextLength;
+                      const charCount = draftEditText.length;
+                      const remaining = typeof max === "number" ? max - charCount : null;
+                      return (
+                        <div style={{ display: "grid", gap: 16 }}>
+                          <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                            <div>
+                              <h3 style={{ margin: 0, fontSize: 16 }}>Preview &amp; Edit — {draftDetails.platform}</h3>
+                              <p style={{ margin: "4px 0", color: "#777", fontSize: 12 }}>
+                                Original captured {formatTimestamp(draftDetails.createdAt)}
+                              </p>
+                            </div>
+                            <div style={{ fontSize: 12, color: remaining !== null && remaining < 0 ? "#c00" : "#555" }}>
+                              {max ? `${charCount}/${max} characters` : `${charCount} characters`}
+                              {remaining !== null && remaining < 0 ? " — over limit" : ""}
+                              {validating && " · validating…"}
+                            </div>
+                          </header>
+                          <div style={{ display: "grid", gap: 12 }}>
+                            <div>
+                              <h4 style={{ margin: "0 0 4px", fontSize: 13, color: "#555" }}>Original</h4>
+                              <pre style={{ whiteSpace: "pre-wrap", fontSize: 13, background: "#f7f7f7", padding: 12, borderRadius: 8 }}>{draftDetails.originalText}</pre>
+                            </div>
+                            <div>
+                              <h4 style={{ margin: "0 0 4px", fontSize: 13, color: "#555" }}>Editable</h4>
+                              <textarea
+                                value={draftEditText}
+                                onChange={(e) => setDraftEditText(e.target.value)}
+                                rows={8}
+                                style={{ ...inputStyle, fontFamily: "monospace", resize: "vertical" }}
+                              />
+                              {validationErrors.length > 0 && (
+                                <ul style={{ marginTop: 8, color: "#c00", fontSize: 12, paddingLeft: 20 }}>
+                                  {validationErrors.map((error) => (
+                                    <li key={error}>{error}</li>
+                                  ))}
+                                </ul>
+                              )}
+                            </div>
+                            <div style={{ display: "flex", gap: 8 }}>
+                              <button style={buttonPrimary} onClick={saveDraftEdits} disabled={savingDraft}>
+                                {savingDraft ? "Saving…" : "Save"}
+                              </button>
+                              <button style={buttonSecondary} onClick={resetDraftEdits}>
+                                Reset to Original
+                              </button>
+                            </div>
+                          </div>
+                          <section>
+                            <h4 style={{ margin: "0 0 6px", fontSize: 13 }}>Change History</h4>
+                            {draftAuditTrail.length === 0 ? (
+                              <p style={{ color: "#777", fontSize: 12 }}>No edits recorded yet.</p>
+                            ) : (
+                              <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: 8 }}>
+                                {draftAuditTrail.map((entry) => (
+                                  <li key={entry.id} style={{ background: "#f7f7f7", padding: 10, borderRadius: 8 }}>
+                                    <p style={{ margin: 0, fontSize: 12, color: "#555" }}>
+                                      {formatTimestamp(entry.createdAt)} — {entry.editor}
+                                    </p>
+                                    <pre style={{ marginTop: 4, whiteSpace: "pre-wrap", fontSize: 12 }}>{entry.editedText}</pre>
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </section>
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
               </section>
             </div>
           ) : (

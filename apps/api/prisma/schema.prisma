@@ -82,9 +82,26 @@ model Draft {
   platform     String
   originalText String
   editedText   String?
+  promptVersionId String?
+  generatorRunId  String?
+  generatedAt     DateTime?
   histories    History[]
+  audits       DraftAudit[]
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+}
+
+model DraftAudit {
+  id         String   @id @default(cuid())
+  org        Org      @relation(fields: [orgId], references: [id])
+  orgId      String
+  draft      Draft    @relation(fields: [draftId], references: [id])
+  draftId    String
+  editor     String
+  editedText String
+  createdAt  DateTime @default(now())
+
+  @@index([orgId, draftId], name: "draft_audit_org_draft")
 }
 
 model History {

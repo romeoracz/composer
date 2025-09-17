@@ -16,7 +16,7 @@ import { list as listSchedules, reschedule as reschedulePost, schedule as schedu
 import { createSecretRecord, decryptRecord, hydrateSecretRecord, redact, serializeSecretRecord, setCredentials, status as integrationStatus, testConnection, testRecord, type ProviderKey } from './integrations';
 import { activate, createVersion, getActive, listVersions, PromptVersion } from './prompts';
 import { createSeed, deleteSeed, listSeeds, updateSeed } from './seeds';
-import { createDraft, editDraft, listDrafts } from './drafts';
+import { createDraft, editDraft, listDrafts, listDraftAudits } from './drafts';
 import { cancelJob, runNow, scheduleJob } from './queue';
 import { recordPublish, listHistory } from './history';
 import { getQueueDriver, initBull, addBullJob, startBullWorker, removeBullJob } from './queueDriver';
@@ -523,11 +523,27 @@ function delayForGeneration(platform: string) {
 
 function attachDraftMetadata(draft: any) {
   const meta = getDraftMetadata(draft.id);
+  const generatedAt = draft.generatedAt instanceof Date
+    ? draft.generatedAt.getTime()
+    : typeof draft.generatedAt === 'number'
+      ? draft.generatedAt
+      : meta?.generatedAt;
   return {
     ...draft,
     createdAt: draft.createdAt instanceof Date ? draft.createdAt.getTime() : draft.createdAt,
     updatedAt: draft.updatedAt instanceof Date ? draft.updatedAt.getTime() : draft.updatedAt,
+    generatedAt,
     generatorMeta: meta ?? null,
+  };
+}
+
+function shapeAuditEntry(audit: any) {
+  return {
+    id: audit.id,
+    draftId: audit.draftId,
+    editor: audit.editor,
+    editedText: audit.editedText,
+    createdAt: audit.createdAt instanceof Date ? audit.createdAt.getTime() : audit.createdAt,
   };
 }
 
@@ -586,6 +602,9 @@ app.post('/drafts/generate', requireAuth, requireOrg, csrfProtection, async (req
           seedId,
           platform,
           originalText: outcome.text,
+          promptVersionId: outcome.record.promptVersionId,
+          generatorRunId: outcome.record.runId,
+          generatedAt: new Date(generatedAt),
         },
       });
       recordDraftMetadata(outcome.record, draft.id, generatedAt, false);
@@ -655,16 +674,38 @@ app.get('/drafts', requireAuth, requireOrg, async (req: any, res) => {
   res.json({ items });
 });
 
-app.post('/drafts/:id/edit', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
-  const text = String(req.body?.text || '');
+app.get('/drafts/:id', requireAuth, requireOrg, async (req: any, res) => {
+  const draftId = req.params.id;
+  const orgId = req.orgId as string;
   if (getDriver() === 'prisma') {
     const prisma = getPrisma();
-    const draft = await prisma.draft.update({ where: { id: req.params.id }, data: { editedText: text } });
-    return res.json({ draft: attachDraftMetadata(draft) });
+    const draft = await prisma.draft.findUnique({ where: { id: draftId } });
+    if (!draft || draft.orgId !== orgId) return res.status(404).json({ error: 'not_found' });
+    const audits = await prisma.draftAudit.findMany({ where: { draftId }, orderBy: { createdAt: 'desc' } });
+    return res.json({ draft: attachDraftMetadata(draft), audits: audits.map((audit: any) => shapeAuditEntry(audit)) });
   }
-  const d = editDraft(req.orgId, req.params.id, text);
+  const draft = listDrafts(orgId).find((d) => d.id === draftId);
+  if (!draft) return res.status(404).json({ error: 'not_found' });
+  const audits = listDraftAudits(orgId, draftId).map((audit) => shapeAuditEntry(audit));
+  res.json({ draft: attachDraftMetadata(draft), audits });
+});
+
+app.post('/drafts/:id/edit', requireAuth, requireOrg, csrfProtection, async (req: any, res) => {
+  const text = String(req.body?.text || '');
+  const editor = req.session?.user?.email || 'unknown';
+  if (getDriver() === 'prisma') {
+    const prisma = getPrisma();
+    const existing = await prisma.draft.findUnique({ where: { id: req.params.id } });
+    if (!existing || existing.orgId !== req.orgId) return res.status(404).json({ error: 'not_found' });
+    const draft = await prisma.draft.update({ where: { id: existing.id }, data: { editedText: text } });
+    await prisma.draftAudit.create({ data: { orgId: req.orgId, draftId: draft.id, editor, editedText: text } });
+    const audits = await prisma.draftAudit.findMany({ where: { draftId: draft.id }, orderBy: { createdAt: 'desc' } });
+    return res.json({ draft: attachDraftMetadata(draft), audits: audits.map((audit: any) => shapeAuditEntry(audit)) });
+  }
+  const d = editDraft(req.orgId, req.params.id, text, editor);
   if (!d) return res.status(404).json({ error: 'not_found' });
-  res.json({ draft: attachDraftMetadata(d) });
+  const audits = listDraftAudits(req.orgId, req.params.id).map((audit) => shapeAuditEntry(audit));
+  res.json({ draft: attachDraftMetadata(d), audits });
 });
 
 app.post('/preview/validate', requireAuth, requireOrg, (req: any, res) => {
